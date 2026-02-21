@@ -3,22 +3,26 @@ Module Registry
 To add a new module:
   1. Create modules/yourmodule.py implementing VRModule
   2. Import it here and add to MODULE_REGISTRY
-  That's it — the GUI and switcher pick it up automatically.
+  That's it -- the GUI and switcher pick it up automatically.
 """
 
 from modules.slimevr import SlimeVRModule
 from modules.steamvr import SteamVRModule
 from modules.resonite import ResoniteModule
+from modules.resonite_mod_settings import ResoniteModSettingsModule
+from modules.resolute import ResoluteModule
 from modules.eyetrackvr import EyeTrackVRModule
 from modules.babble import BabbleModule
 
-# Ordered list of available modules — order determines GUI display order
+# Ordered list of available modules -- order determines GUI display order
 MODULE_REGISTRY: dict[str, type] = {
-    SlimeVRModule.id: SlimeVRModule,
-    SteamVRModule.id: SteamVRModule,
-    ResoniteModule.id: ResoniteModule,
-    EyeTrackVRModule.id: EyeTrackVRModule,
-    BabbleModule.id: BabbleModule,
+    SlimeVRModule.id:               SlimeVRModule,
+    SteamVRModule.id:               SteamVRModule,
+    ResoniteModule.id:              ResoniteModule,
+    ResoniteModSettingsModule.id:   ResoniteModSettingsModule,
+    ResoluteModule.id:              ResoluteModule,
+    EyeTrackVRModule.id:            EyeTrackVRModule,
+    BabbleModule.id:                BabbleModule,
 }
 
 

@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Default module config for new profiles
 DEFAULT_MODULE_CONFIG = {
-    "slimevr":    {"enabled": True,  "options": {}},
-    "steamvr":    {"enabled": True,  "options": {"active_driver": None}},
-    "resonite":   {"enabled": True,  "options": {}},
-    "eyetrackvr": {"enabled": False, "options": {}},
-    "babble":     {"enabled": False, "options": {}},
+    "slimevr":                  {"enabled": True,  "options": {}},
+    "steamvr":                  {"enabled": True,  "options": {"active_driver": None}},
+    "resonite":                 {"enabled": True,  "options": {}},
+    "resonite_mod_settings":    {"enabled": True,  "options": {}},
+    "resolute":                 {"enabled": False, "options": {"save_dlls": True}},
+    "eyetrackvr":               {"enabled": False, "options": {"include_vrcft_module": True}},
+    "babble":                   {"enabled": False, "options": {"include_vrcft_module": True}},
 }
 
 

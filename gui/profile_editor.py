@@ -141,6 +141,44 @@ class ProfileEditorDialog(QDialog):
                 ow.setEnabled(bool(state))
             cb.stateChanged.connect(_toggle_driver)
 
+        elif mid == "resolute":
+            opt_row = QHBoxLayout()
+            opt_row.setContentsMargins(22, 0, 0, 0)
+            save_dlls_cb = QCheckBox("Include mod DLL files (rml_mods/ & rml_libs/)")
+            save_dlls_cb.setToolTip(
+                "When enabled, the actual .dll files are saved with the profile so switching "
+                "profiles truly changes which mods are active. Profiles may be 10-100 MB larger."
+            )
+            opt_row.addWidget(save_dlls_cb)
+            opt_row.addStretch()
+            opt_widget = QWidget()
+            opt_widget.setLayout(opt_row)
+            layout.addWidget(opt_widget)
+            widgets["extra"]["save_dlls_cb"] = save_dlls_cb
+
+            def _toggle_resolute(state, ow=opt_widget):
+                ow.setEnabled(bool(state))
+            cb.stateChanged.connect(_toggle_resolute)
+
+        elif mid in ("eyetrackvr", "babble"):
+            opt_row = QHBoxLayout()
+            opt_row.setContentsMargins(22, 0, 0, 0)
+            vrcft_cb = QCheckBox("Include VRCFT module config")
+            vrcft_cb.setToolTip(
+                "Also save/restore the VRCFaceTracking module config for this app "
+                "(ETVRModuleConfig.json / VRCFaceTracking.Babble.json)"
+            )
+            opt_row.addWidget(vrcft_cb)
+            opt_row.addStretch()
+            opt_widget = QWidget()
+            opt_widget.setLayout(opt_row)
+            layout.addWidget(opt_widget)
+            widgets["extra"]["vrcft_cb"] = vrcft_cb
+
+            def _toggle_vrcft(state, ow=opt_widget):
+                ow.setEnabled(bool(state))
+            cb.stateChanged.connect(_toggle_vrcft)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -158,14 +196,26 @@ class ProfileEditorDialog(QDialog):
         for mid, widgets in self._module_widgets.items():
             cb: QCheckBox = widgets["checkbox"]
             cb.setChecked(self.profile.is_module_enabled(mid))
+            opts = self.profile.get_module_options(mid)
+
             if "driver_combo" in widgets.get("extra", {}):
                 combo: QComboBox = widgets["extra"]["driver_combo"]
-                current_driver = self.profile.get_module_options(mid).get("active_driver")
+                current_driver = opts.get("active_driver")
                 for i in range(combo.count()):
                     if combo.itemData(i) == current_driver:
                         combo.setCurrentIndex(i)
                         break
                 combo.setEnabled(self.profile.is_module_enabled(mid))
+
+            if "save_dlls_cb" in widgets.get("extra", {}):
+                dlls_cb: QCheckBox = widgets["extra"]["save_dlls_cb"]
+                dlls_cb.setChecked(bool(opts.get("save_dlls", True)))
+                dlls_cb.setEnabled(self.profile.is_module_enabled(mid))
+
+            if "vrcft_cb" in widgets.get("extra", {}):
+                vrcft_cb: QCheckBox = widgets["extra"]["vrcft_cb"]
+                vrcft_cb.setChecked(bool(opts.get("include_vrcft_module", True)))
+                vrcft_cb.setEnabled(self.profile.is_module_enabled(mid))
 
     def _on_accept(self):
         name = self.name_edit.text().strip()
@@ -185,5 +235,11 @@ class ProfileEditorDialog(QDialog):
             if "driver_combo" in widgets.get("extra", {}):
                 combo: QComboBox = widgets["extra"]["driver_combo"]
                 self.profile.set_module_option(mid, "active_driver", combo.currentData())
+            if "save_dlls_cb" in widgets.get("extra", {}):
+                dlls_cb: QCheckBox = widgets["extra"]["save_dlls_cb"]
+                self.profile.set_module_option(mid, "save_dlls", dlls_cb.isChecked())
+            if "vrcft_cb" in widgets.get("extra", {}):
+                vrcft_cb: QCheckBox = widgets["extra"]["vrcft_cb"]
+                self.profile.set_module_option(mid, "include_vrcft_module", vrcft_cb.isChecked())
 
         self.accept()

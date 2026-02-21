@@ -17,15 +17,6 @@ A modular user profile switcher for VR tracking software. Instantly save and res
 2. Double-click `launch.bat` — it will install dependencies and start the app
 3. Or manually: `pip install -r requirements.txt` then `python main.py`
 
-Note: on my system where I have conda installed, I had to create a new environment to get pyqt6 to work:
-```
-$ conda create -n pyqt6 python=3.12
-$ conda activate pyqt6
-$ pip install -r requirements.txt
-$ ./launch.bat
-
-```
-
 ## Usage
 
 1. **Create a profile** — click "＋ New", name it (e.g. "Alice"), toggle which modules to include
