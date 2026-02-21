@@ -1,21 +1,12 @@
 """
 Project Babble Module
-Manages Project Babble mouth tracking app configuration.
+Manages Project Babble mouth/face tracking app configuration.
 
-Project Babble stores its config in babble_settings.json.
-The file lives in the app's working directory (usually the install dir).
-On Windows with the installer build, that's typically:
-  %LOCALAPPDATA%\\Programs\\ProjectBabble\
-  OR %LOCALAPPDATA%/ProjectBabble/
-  OR wherever the user installed/extracted it
-
-Config file: babble_settings.json
-  Contains: camera source, ROI, rotation, OSC port/address, 
-            GPU acceleration setting, model path, calibration data
+Confirmed config location (from user):
+  C:/Program Files (x86)/Project Babble/babble_settings.json
 
 Also saves the VRCFT Babble module config if present:
   %APPDATA%/VRCFaceTracking/CustomLibs/VRCFaceTracking.Babble.json
-  (or similar, depending on version)
 """
 
 from __future__ import annotations
@@ -28,71 +19,47 @@ from core.module_base import VRModule, ModuleStatus
 
 logger = logging.getLogger(__name__)
 
-BABBLE_CONFIG_FILES = [
-    "babble_settings.json",
-    "settings.json",
-    "config.json",
-]
+DEFAULT_BABBLE_DIR = Path("C:/Program Files (x86)/Project Babble")
+CONFIG_FILENAME = "babble_settings.json"
 
 
 def _find_babble_dir() -> Path | None:
-    local = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-    appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-    userprofile = os.environ.get("USERPROFILE", str(Path.home()))
-
     candidates = [
-        Path(local) / "Programs" / "ProjectBabble",
-        Path(local) / "Programs" / "project-babble",
-        Path(local) / "ProjectBabble",
-        Path(appdata) / "ProjectBabble",
-        Path(userprofile) / "ProjectBabble",
-        Path("C:/ProjectBabble"),
-        Path("C:/Program Files/ProjectBabble"),
-        Path("C:/Program Files (x86)/ProjectBabble"),
+        DEFAULT_BABBLE_DIR,
+        Path("C:/Program Files/Project Babble"),
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Project Babble",
+        Path(os.environ.get("APPDATA", "")) / "ProjectBabble",
     ]
     for c in candidates:
-        if c.exists() and any((c / f).exists() for f in BABBLE_CONFIG_FILES):
-            return c
-    for c in candidates:
-        if c.exists():
+        if (c / CONFIG_FILENAME).exists():
             return c
     return None
 
 
-def _vrcft_appdata() -> Path:
+def _vrcft_babble_config() -> Path:
     appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-    return Path(appdata) / "VRCFaceTracking"
+    return Path(appdata) / "VRCFaceTracking" / "CustomLibs" / "VRCFaceTracking.Babble.json"
 
 
 class BabbleModule(VRModule):
     id = "babble"
     display_name = "Project Babble"
     icon = "💬"
-    description = (
-        "Project Babble mouth/face tracking -- saves camera config, "
-        "ROI calibration, OSC settings, and VRCFT module config"
-    )
+    description = "Project Babble face tracking -- saves babble_settings.json and optional VRCFT module config"
 
-    def _babble_dir(self) -> Path | None:
+    def _babble_dir(self) -> Path:
         override = self.options.get("babble_dir")
         if override:
             return Path(override)
-        return _find_babble_dir()
+        return _find_babble_dir() or DEFAULT_BABBLE_DIR
 
     def _include_vrcft(self) -> bool:
         return bool(self.options.get("include_vrcft_module", True))
 
     def get_config_paths(self) -> list[Path]:
-        paths = []
-        babble = self._babble_dir()
-        if babble:
-            for fname in BABBLE_CONFIG_FILES:
-                paths.append(babble / fname)
+        paths = [self._babble_dir() / CONFIG_FILENAME]
         if self._include_vrcft():
-            vrcft = _vrcft_appdata()
-            # The VRCFT Babble module config (name varies by version)
-            for fname in ("VRCFaceTracking.Babble.json", "Babble.json", "babble_module.json"):
-                paths.append(vrcft / "CustomLibs" / fname)
+            paths.append(_vrcft_babble_config())
         return paths
 
     def get_process_names(self) -> list[str]:
@@ -111,12 +78,11 @@ class BabbleModule(VRModule):
                     pids.append(proc.info["pid"])
         except Exception:
             pass
-        babble = self._babble_dir()
-        configs_exist = bool(babble and any((babble / f).exists() for f in BABBLE_CONFIG_FILES))
+        config = self._babble_dir() / CONFIG_FILENAME
         return ModuleStatus(
             is_running=bool(pids),
             process_pids=pids,
-            config_paths_exist=configs_exist,
+            config_paths_exist=config.exists(),
         )
 
     def backup(self, dest_dir: Path) -> tuple[bool, str]:
@@ -124,41 +90,37 @@ class BabbleModule(VRModule):
         module_dest.mkdir(parents=True, exist_ok=True)
         saved = []
         errors = []
-        babble = self._babble_dir()
 
-        if babble:
-            for fname in BABBLE_CONFIG_FILES:
-                src = babble / fname
-                if src.exists():
-                    try:
-                        shutil.copy2(src, module_dest / fname)
-                        saved.append(fname)
-                    except Exception as e:
-                        errors.append(f"{fname}: {e}")
+        # Main settings file
+        src = self._babble_dir() / CONFIG_FILENAME
+        if src.exists():
+            try:
+                shutil.copy2(src, module_dest / CONFIG_FILENAME)
+                saved.append(CONFIG_FILENAME)
+            except Exception as e:
+                errors.append(f"{CONFIG_FILENAME}: {e}")
+        else:
+            return False, f"Config not found: {src}"
 
-        # VRCFT Babble module config
+        # VRCFT module config (optional)
         if self._include_vrcft():
-            vrcft_custom = _vrcft_appdata() / "CustomLibs"
-            for fname in ("VRCFaceTracking.Babble.json", "Babble.json", "babble_module.json"):
-                src = vrcft_custom / fname
-                if src.exists():
-                    try:
-                        shutil.copy2(src, module_dest / fname)
-                        saved.append(f"VRCFT/{fname}")
-                    except Exception as e:
-                        errors.append(f"{fname}: {e}")
+            vrcft_src = _vrcft_babble_config()
+            if vrcft_src.exists():
+                try:
+                    shutil.copy2(vrcft_src, module_dest / vrcft_src.name)
+                    saved.append(vrcft_src.name)
+                except Exception as e:
+                    errors.append(f"{vrcft_src.name}: {e}")
 
         manifest = {
-            "babble_dir": str(babble) if babble else None,
+            "babble_dir": str(self._babble_dir()),
             "include_vrcft": self._include_vrcft(),
         }
         (module_dest / "_manifest.json").write_text(json.dumps(manifest, indent=2))
 
-        if not saved:
-            return False, f"Nothing saved -- Babble config not found (searched: {babble})"
-        msg = f"Saved: {', '.join(saved)}"
+        msg = f"Backed up: {', '.join(saved)}"
         if errors:
-            msg += f" (errors: {'; '.join(errors)})"
+            msg += f" | Errors: {'; '.join(errors)}"
         return True, msg
 
     def restore(self, src_dir: Path) -> tuple[bool, str]:
@@ -174,52 +136,44 @@ class BabbleModule(VRModule):
             except Exception:
                 pass
 
-        babble = self._babble_dir()
-        if not babble and manifest.get("babble_dir"):
-            babble = Path(manifest["babble_dir"])
-
+        babble_dir = Path(manifest.get("babble_dir", str(self._babble_dir())))
         restored = []
         errors = []
 
-        if babble:
-            babble.mkdir(parents=True, exist_ok=True)
-            for fname in BABBLE_CONFIG_FILES:
-                src_file = module_src / fname
-                if src_file.exists():
-                    try:
-                        shutil.copy2(src_file, babble / fname)
-                        restored.append(fname)
-                    except Exception as e:
-                        errors.append(f"{fname}: {e}")
+        src = module_src / CONFIG_FILENAME
+        if src.exists():
+            try:
+                babble_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, babble_dir / CONFIG_FILENAME)
+                restored.append(CONFIG_FILENAME)
+            except Exception as e:
+                errors.append(f"{CONFIG_FILENAME}: {e}")
 
-        # Restore VRCFT Babble module config
-        if manifest.get("include_vrcft", True):
-            vrcft_custom = _vrcft_appdata() / "CustomLibs"
-            for fname in ("VRCFaceTracking.Babble.json", "Babble.json", "babble_module.json"):
-                src_file = module_src / fname
-                if src_file.exists():
-                    try:
-                        vrcft_custom.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_file, vrcft_custom / fname)
-                        restored.append(f"VRCFT/{fname}")
-                    except Exception as e:
-                        errors.append(f"{fname}: {e}")
+        # Restore VRCFT module config
+        vrcft_dst = _vrcft_babble_config()
+        vrcft_src = module_src / vrcft_dst.name
+        if vrcft_src.exists() and manifest.get("include_vrcft", True):
+            try:
+                vrcft_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(vrcft_src, vrcft_dst)
+                restored.append(vrcft_dst.name)
+            except Exception as e:
+                errors.append(f"{vrcft_dst.name}: {e}")
 
         if not restored:
             return False, "Nothing restored"
         msg = f"Restored: {', '.join(restored)}"
         if errors:
-            msg += f" (errors: {'; '.join(errors)})"
+            msg += f" | Errors: {'; '.join(errors)}"
         return True, msg
 
     def validate_backup(self, profile_dir: Path) -> tuple[bool, str]:
         module_src = profile_dir / self.id
         if not module_src.exists():
             return False, "No Project Babble backup in this profile"
-        has_config = any((module_src / f).exists() for f in BABBLE_CONFIG_FILES)
-        if not has_config:
-            return False, "Backup exists but no config files found"
-        return True, "Babble config backup found"
+        if not (module_src / CONFIG_FILENAME).exists():
+            return False, f"Backup missing {CONFIG_FILENAME}"
+        return True, f"{CONFIG_FILENAME} found in backup"
 
     def can_reload_live(self) -> bool:
         return False

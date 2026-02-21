@@ -142,6 +142,31 @@ class ProfileManager:
         logger.info(f"Deleted profile: {name}")
         return True
 
+    def duplicate_profile(self, src_name: str, new_name: str) -> Profile:
+        """Copy a profile directory and its module data to a new profile name."""
+        import shutil
+        src_dir = self._profile_dir(src_name)
+        if not src_dir.exists():
+            raise ValueError(f"Profile '{src_name}' not found")
+        dst_dir = self._profile_dir(new_name)
+        if dst_dir.exists():
+            raise ValueError(f"Profile '{new_name}' already exists")
+
+        shutil.copytree(src_dir, dst_dir)
+
+        # Update the name field in the copied profile.json
+        meta_file = dst_dir / "profile.json"
+        if meta_file.exists():
+            try:
+                data = json.loads(meta_file.read_text(encoding="utf-8"))
+                data["name"] = new_name
+                data["created"] = datetime.now().isoformat()
+                meta_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        return self.get_profile(new_name)
+
     def rename_profile(self, old_name: str, new_name: str) -> Profile:
         new_name = self._sanitize_name(new_name)
         old_dir = self._profile_dir(old_name)

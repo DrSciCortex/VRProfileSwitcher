@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QPushButton,
     QFrame, QSplitter, QTextEdit, QGroupBox, QScrollArea,
     QMessageBox, QProgressBar, QStatusBar, QMenu, QInputDialog,
-    QCheckBox, QSizePolicy,
+    QCheckBox, QSizePolicy, QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QAction, QIcon
@@ -214,6 +214,76 @@ class ProfileListItem(QListWidgetItem):
         self.setSizeHint(QSize(0, 56))
 
 
+class PartialSaveDialog(QDialog):
+    """
+    Dialog that lets the user pick which modules to save individually.
+    Only shows modules that are enabled in the current profile.
+    """
+
+    def __init__(self, parent=None, profile=None):
+        super().__init__(parent)
+        self.profile = profile
+        self.setWindowTitle("Save Selected Modules")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        header = QLabel("Choose which modules to save into this profile:")
+        header.setWordWrap(True)
+        header.setStyleSheet("color: #a0a0c0; font-size: 12px;")
+        layout.addWidget(header)
+
+        # One checkbox per enabled module
+        for mid in self.profile.enabled_modules():
+            cls = MODULE_REGISTRY.get(mid)
+            if not cls:
+                continue
+            module = cls()
+            cb = QCheckBox(f"{module.icon}  {module.display_name}")
+            cb.setChecked(True)  # default: all ticked
+            cb.setFont(QFont("Segoe UI", 10))
+            layout.addWidget(cb)
+            self._checkboxes[mid] = cb
+
+        if not self._checkboxes:
+            layout.addWidget(QLabel("No modules enabled in this profile."))
+
+        # Select all / none shortcuts
+        sel_row = QHBoxLayout()
+        all_btn = QPushButton("Select All")
+        all_btn.setFixedWidth(90)
+        all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in self._checkboxes.values()])
+        none_btn = QPushButton("Select None")
+        none_btn.setFixedWidth(90)
+        none_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in self._checkboxes.values()])
+        sel_row.addWidget(all_btn)
+        sel_row.addWidget(none_btn)
+        sel_row.addStretch()
+        layout.addLayout(sel_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #333;")
+        layout.addWidget(sep)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("💾  Save Selected")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_modules(self) -> list[str]:
+        return [mid for mid, cb in self._checkboxes.items() if cb.isChecked()]
+
+
 class MainWindow(QMainWindow):
     def __init__(self, pm: ProfileManager, settings: AppSettings):
         super().__init__()
@@ -318,6 +388,12 @@ class MainWindow(QMainWindow):
         new_btn.clicked.connect(self._on_new_profile)
         btn_layout.addWidget(new_btn)
 
+        self.dup_btn = QPushButton("⧉ Duplicate")
+        self.dup_btn.clicked.connect(self._on_duplicate_profile)
+        self.dup_btn.setEnabled(False)
+        self.dup_btn.setToolTip("Duplicate this profile including all saved module data")
+        btn_layout.addWidget(self.dup_btn)
+
         self.del_btn = QPushButton("🗑 Delete")
         self.del_btn.setObjectName("danger")
         self.del_btn.clicked.connect(self._on_delete_profile)
@@ -371,11 +447,18 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout(action_group)
         action_layout.setSpacing(10)
 
-        self.backup_btn = QPushButton("💾  Save Current → Profile")
+        self.backup_btn = QPushButton("💾  Save All → Profile")
         self.backup_btn.setObjectName("primary")
         self.backup_btn.setEnabled(False)
         self.backup_btn.clicked.connect(self._on_backup)
+        self.backup_btn.setToolTip("Save current settings for all enabled modules into this profile")
         action_layout.addWidget(self.backup_btn)
+
+        self.partial_backup_btn = QPushButton("💾  Save Selected…")
+        self.partial_backup_btn.setEnabled(False)
+        self.partial_backup_btn.clicked.connect(self._on_partial_backup)
+        self.partial_backup_btn.setToolTip("Choose which modules to save into this profile")
+        action_layout.addWidget(self.partial_backup_btn)
 
         self.load_btn = QPushButton("▶  Load This Profile")
         self.load_btn.setObjectName("success")
@@ -487,8 +570,10 @@ class MainWindow(QMainWindow):
         self.profile_name_lbl.setText(profile.name)
         self.notes_lbl.setText(profile.notes or "")
         self.edit_btn.setEnabled(True)
+        self.dup_btn.setEnabled(True)
         self.del_btn.setEnabled(True)
         self.backup_btn.setEnabled(True)
+        self.partial_backup_btn.setEnabled(True)
         self.load_btn.setEnabled(True)
 
         # Update module checkboxes
@@ -502,6 +587,7 @@ class MainWindow(QMainWindow):
         self.profile_name_lbl.setText("Select a profile →")
         self.notes_lbl.setText("")
         self.edit_btn.setEnabled(False)
+        self.dup_btn.setEnabled(False)
         self.del_btn.setEnabled(False)
         self.backup_btn.setEnabled(False)
         self.load_btn.setEnabled(False)
@@ -543,14 +629,75 @@ class MainWindow(QMainWindow):
             profile = dlg.profile
             try:
                 created = self.pm.create_profile(profile.name, profile.notes)
-                # Copy module config from dialog
                 created.modules = profile.modules
                 self.pm.save_profile_meta(created)
                 self._refresh_profile_list()
                 self._log(f"✅ Created profile '{profile.name}'")
-                self.status_bar.showMessage(f"Profile '{profile.name}' created")
+                self.status_bar.showMessage(f"Profile '{profile.name}' created — saving current settings...")
+
+                # Immediately snapshot current live settings into the new profile
+                self._set_busy(True)
+                self._log(f"💾 Capturing current settings into '{profile.name}'...")
+
+                def do_initial_backup(progress):
+                    return self.switcher.backup_to_profile(created, progress=progress)
+
+                def on_initial_backup_done(result: OperationResult):
+                    self._set_busy(False)
+                    if result.success:
+                        self._log(f"✅ Current settings saved to '{created.name}' — {result.summary}")
+                        self.status_bar.showMessage(f"Profile '{created.name}' created and populated")
+                    else:
+                        self._log(f"⚠ Profile created but some modules failed to save:")
+                        self._log_errors(result)
+                        self.status_bar.showMessage(f"Profile '{created.name}' created (some modules had errors)")
+
+                self._run_worker(do_initial_backup, on_done=on_initial_backup_done)
+
             except ValueError as e:
                 QMessageBox.warning(self, "Error", str(e))
+
+    def _on_duplicate_profile(self):
+        if not self._current_profile:
+            return
+        src = self._current_profile
+        existing = [p.name for p in self.pm.list_profiles()]
+
+        # Suggest a name
+        base = src.name
+        candidate = f"{base} (copy)"
+        n = 2
+        while candidate in existing:
+            candidate = f"{base} (copy {n})"
+            n += 1
+
+        name, ok = QInputDialog.getText(
+            self, "Duplicate Profile",
+            "Name for the duplicate profile:",
+            text=candidate,
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in existing:
+            QMessageBox.warning(self, "Error", f"A profile named '{name}' already exists.")
+            return
+
+        try:
+            self.pm.duplicate_profile(src.name, name)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to duplicate profile: {e}")
+            return
+
+        self._refresh_profile_list()
+        # Select the new profile
+        for i in range(self.profile_list.count()):
+            item = self.profile_list.item(i)
+            if isinstance(item, ProfileListItem) and item.profile.name == name:
+                self.profile_list.setCurrentItem(item)
+                break
+        self._log(f"✅ Duplicated '{src.name}' → '{name}'")
+        self.status_bar.showMessage(f"Profile duplicated as '{name}'")
 
     def _on_edit_profile(self):
         if not self._current_profile:
@@ -595,6 +742,7 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         menu.addAction("✏ Edit", self._on_edit_profile)
+        menu.addAction("⧉ Duplicate", self._on_duplicate_profile)
         menu.addAction("💾 Save Current → This Profile", self._on_backup)
         menu.addAction("▶ Load This Profile", self._on_load_profile)
         menu.addSeparator()
@@ -626,6 +774,50 @@ class MainWindow(QMainWindow):
             return self.switcher.backup_to_profile(profile, progress=progress)
 
         self._run_worker(do_backup, on_done=self._on_backup_done)
+
+    def _on_partial_backup(self):
+        """Show a dialog to pick which modules to save, then back up only those."""
+        if not self._current_profile:
+            return
+        profile = self._current_profile
+
+        dlg = PartialSaveDialog(self, profile=profile)
+        if not dlg.exec():
+            return
+
+        selected_modules = dlg.selected_modules()
+        if not selected_modules:
+            self.status_bar.showMessage("No modules selected — nothing saved")
+            return
+
+        self._set_busy(True)
+        names = ", ".join(selected_modules)
+        self._log(f"💾 Saving selected modules to '{profile.name}': {names}...")
+
+        def do_partial_backup(progress):
+            # Temporarily override enabled modules for this backup
+            import copy
+            from core.switcher import OperationResult
+            result = OperationResult(success=True)
+            dest_dir = self.pm.profile_dir(profile.name)
+            for mid in selected_modules:
+                if progress:
+                    progress(mid, "backup", f"Backing up {mid}...")
+                try:
+                    from modules import get_module
+                    module = get_module(mid, profile.get_module_options(mid))
+                    ok, msg = module.backup(dest_dir)
+                    result.module_results[mid] = (ok, msg)
+                    if not ok:
+                        result.success = False
+                        result.errors.append(f"{module.display_name}: {msg}")
+                except Exception as e:
+                    result.module_results[mid] = (False, str(e))
+                    result.success = False
+                    result.errors.append(f"{mid}: {e}")
+            return result
+
+        self._run_worker(do_partial_backup, on_done=self._on_backup_done)
 
     def _on_backup_done(self, result: OperationResult):
         self._set_busy(False)
@@ -748,8 +940,10 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool):
         self.progress_bar.setVisible(busy)
-        self.backup_btn.setEnabled(not busy and bool(self._current_profile))
-        self.load_btn.setEnabled(not busy and bool(self._current_profile))
+        has_profile = not busy and bool(self._current_profile)
+        self.backup_btn.setEnabled(has_profile)
+        self.partial_backup_btn.setEnabled(has_profile)
+        self.load_btn.setEnabled(has_profile)
         self.undo_btn.setEnabled(not busy and self.pm.auto_backup_dir().exists())
 
     # ------------------------------------------------------------------

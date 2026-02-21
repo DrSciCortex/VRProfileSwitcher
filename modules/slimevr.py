@@ -1,7 +1,19 @@
 """
 SlimeVR Module
 Manages SlimeVR Server configuration files on Windows.
-Config location: %APPDATA%/SlimeVR-Server/ (Java app via SteamVR or standalone)
+
+Correct config path (confirmed from official SlimeVR release notes):
+  %APPDATA%\dev.slimevr.SlimeVR\
+
+Key files inside that directory:
+  vrconfig.yml       -- main server config (network, OSC, tracker settings)
+  calibration.json   -- IMU calibration data per tracker
+  bonelengths.json   -- skeleton bone length measurements
+  osc.json           -- OSC output settings
+  vmc.json           -- VMC protocol settings
+  filtering.json     -- tracker filtering/smoothing settings
+  tapDetection.json  -- tap gesture detection settings
+  overlayconfig.yml  -- SteamVR overlay settings
 """
 
 from __future__ import annotations
@@ -14,9 +26,8 @@ class SlimeVRModule(VRModule):
     id = "slimevr"
     display_name = "SlimeVR"
     icon = "🦴"
-    description = "Full-body tracking server — saves tracker calibration, bone lengths, and server settings"
+    description = "Full-body tracking server -- saves tracker calibration, bone lengths, and server settings"
 
-    # Known config filenames within the SlimeVR config directory
     CONFIG_FILES = [
         "vrconfig.yml",
         "calibration.json",
@@ -29,16 +40,15 @@ class SlimeVRModule(VRModule):
     ]
 
     def _config_dir(self) -> Path:
-        appdata = os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")
-        # SlimeVR stores config here when launched via standalone or Steam
-        return Path(appdata) / "SlimeVR-Server"
+        # Official path from SlimeVR release notes:
+        #   "back up your vrconfig.yml at %AppData%\dev.slimevr.SlimeVR"
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        return Path(appdata) / "dev.slimevr.SlimeVR"
 
     def get_config_paths(self) -> list[Path]:
         base = self._config_dir()
-        paths = []
-        for fname in self.CONFIG_FILES:
-            paths.append(base / fname)
-        # Also include any extra .yml/.json files dynamically present
+        paths = [base / fname for fname in self.CONFIG_FILES]
+        # Also pick up any extra .yml/.json files that may exist (e.g. from newer versions)
         if base.exists():
             for f in base.iterdir():
                 if f.suffix in (".yml", ".json") and f.name not in self.CONFIG_FILES:
@@ -46,13 +56,10 @@ class SlimeVRModule(VRModule):
         return paths
 
     def get_process_names(self) -> list[str]:
-        # SlimeVR server is a Java app; also check for the wrapper exe
         return ["slimevr.exe", "slimevr-server.exe", "java.exe"]
 
     def get_status(self):
-        """
-        Override: java.exe is too generic, so we try to match by cmdline.
-        """
+        """java.exe is too generic; match by cmdline too."""
         import psutil
         from core.module_base import ModuleStatus
         pids = []
@@ -74,5 +81,4 @@ class SlimeVRModule(VRModule):
         )
 
     def can_reload_live(self) -> bool:
-        # SlimeVR does not expose a reload API
         return False
