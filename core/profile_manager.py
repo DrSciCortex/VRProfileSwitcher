@@ -134,13 +134,129 @@ class ProfileManager:
         logger.info(f"Created profile: {name}")
         return profile
 
+    DELETED_DIR_NAME = "__deleted__"
+    DELETED_HISTORY_MAX = 5
+
+    def deleted_dir(self) -> Path:
+        return self.base_dir / self.DELETED_DIR_NAME
+
     def delete_profile(self, name: str) -> bool:
+        """
+        Move the profile to __deleted__/<timestamp>_<name>/ instead of
+        permanently removing it. Keeps only the last DELETED_HISTORY_MAX
+        deleted profiles, pruning the oldest when the limit is exceeded.
+        """
         d = self._profile_dir(name)
         if not d.exists():
             return False
-        shutil.rmtree(d)
-        logger.info(f"Deleted profile: {name}")
+
+        trash = self.deleted_dir()
+        trash.mkdir(parents=True, exist_ok=True)
+
+        # Timestamped folder name so multiple deletes of same name don't clash
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = trash / f"{stamp}_{name}"
+        shutil.move(str(d), dest)
+        logger.info(f"Moved profile '{name}' to trash: {dest}")
+
+        # Prune oldest entries beyond the rolling limit
+        entries = sorted(trash.iterdir(), key=lambda p: p.stat().st_mtime)
+        while len(entries) > self.DELETED_HISTORY_MAX:
+            oldest = entries.pop(0)
+            shutil.rmtree(oldest)
+            logger.info(f"Pruned old deleted profile: {oldest.name}")
+
         return True
+
+    def import_profile(self, src_dir: Path) -> str:
+        """
+        Copy a profile directory from a foreign data location into this manager's
+        profiles dir. Handles name clashes by appending (imported N).
+        Returns the final profile name used.
+        """
+        if not src_dir.exists():
+            raise ValueError(f"Source directory not found: {src_dir}")
+
+        meta_file = src_dir / "profile.json"
+        if not meta_file.exists():
+            raise ValueError(f"Not a valid profile directory (no profile.json): {src_dir}")
+
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            original_name = data.get("name", src_dir.name)
+        except Exception:
+            original_name = src_dir.name
+
+        existing = {p.name for p in self.list_profiles()}
+        target_name = original_name
+        n = 2
+        while target_name in existing:
+            target_name = f"{original_name} (imported {n})"
+            n += 1
+
+        dest = self._profile_dir(target_name)
+        shutil.copytree(src_dir, dest)
+
+        dest_meta = dest / "profile.json"
+        if dest_meta.exists():
+            try:
+                data = json.loads(dest_meta.read_text(encoding="utf-8"))
+                data["name"] = target_name
+                dest_meta.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        logger.info(f"Imported profile '{original_name}' as '{target_name}' from {src_dir}")
+        return target_name
+
+    def list_deleted_profiles(self) -> list[tuple[str, Path]]:
+        """Return (display_name, path) for each entry in the deleted history, newest first."""
+        trash = self.deleted_dir()
+        if not trash.exists():
+            return []
+        entries = sorted(trash.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        result = []
+        for entry in entries:
+            # Strip the timestamp prefix to get the original name
+            parts = entry.name.split("_", 2)
+            display = parts[2] if len(parts) == 3 else entry.name
+            result.append((display, entry))
+        return result
+
+    def restore_deleted_profile(self, deleted_path: Path, new_name: str | None = None) -> Profile:
+        """Restore a deleted profile back into the active profiles."""
+        if not deleted_path.exists():
+            raise ValueError(f"Deleted profile path not found: {deleted_path}")
+        parts = deleted_path.name.split("_", 2)
+        original_name = parts[2] if len(parts) == 3 else deleted_path.name
+        target_name = new_name or original_name
+
+        # Avoid name clash with existing active profiles
+        existing = [p.name for p in self.list_profiles()]
+        if target_name in existing:
+            base = target_name
+            n = 2
+            while target_name in existing:
+                target_name = f"{base} (restored {n})"
+                n += 1
+
+        dest = self._profile_dir(target_name)
+        shutil.copytree(deleted_path, dest)
+
+        # Update name in profile.json
+        meta_file = dest / "profile.json"
+        if meta_file.exists():
+            try:
+                data = json.loads(meta_file.read_text(encoding="utf-8"))
+                data["name"] = target_name
+                meta_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        # Remove from trash
+        shutil.rmtree(deleted_path)
+        logger.info(f"Restored deleted profile '{original_name}' as '{target_name}'")
+        return self.get_profile(target_name)
 
     def duplicate_profile(self, src_name: str, new_name: str) -> Profile:
         """Copy a profile directory and its module data to a new profile name."""

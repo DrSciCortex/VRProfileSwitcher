@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QPushButton,
     QFrame, QSplitter, QTextEdit, QGroupBox, QScrollArea,
     QMessageBox, QProgressBar, QStatusBar, QMenu, QInputDialog,
-    QCheckBox, QSizePolicy, QDialog, QDialogButtonBox,
+    QCheckBox, QSizePolicy, QDialog, QDialogButtonBox, QFileDialog, QGridLayout,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QAction, QIcon
@@ -178,6 +178,14 @@ QLabel#header {
 QLabel#subheader {
     font-size: 12px;
     color: #505080;
+}
+QToolTip {
+    background-color: #1e1e3a;
+    color: #d4d4e8;
+    border: 1px solid #4040a0;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 """
 
@@ -381,24 +389,50 @@ class MainWindow(QMainWindow):
         # Sidebar action buttons
         btn_area = QWidget()
         btn_area.setStyleSheet("background: #0d0d18; border-top: 1px solid #1a1a28;")
-        btn_layout = QHBoxLayout(btn_area)
-        btn_layout.setContentsMargins(8, 8, 8, 8)
+        btn_layout = QGridLayout(btn_area)
+        btn_layout.setContentsMargins(6, 6, 6, 6)
+        btn_layout.setSpacing(4)
 
         new_btn = QPushButton("＋ New")
         new_btn.clicked.connect(self._on_new_profile)
-        btn_layout.addWidget(new_btn)
+        new_btn.setToolTip("Create a new profile and snapshot current settings")
+        new_btn.setFixedHeight(30)
+        new_btn.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        btn_layout.addWidget(new_btn, 0, 0)
+
+        restore_del_btn = QPushButton("↩ Recover")
+        restore_del_btn.clicked.connect(self._on_restore_deleted)
+        restore_del_btn.setToolTip("Restore a recently deleted profile (last 5 kept)")
+        restore_del_btn.setFixedHeight(30)
+        restore_del_btn.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        btn_layout.addWidget(restore_del_btn, 0, 1)
 
         self.dup_btn = QPushButton("⧉ Duplicate")
         self.dup_btn.clicked.connect(self._on_duplicate_profile)
         self.dup_btn.setEnabled(False)
         self.dup_btn.setToolTip("Duplicate this profile including all saved module data")
-        btn_layout.addWidget(self.dup_btn)
+        self.dup_btn.setFixedHeight(30)
+        self.dup_btn.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        btn_layout.addWidget(self.dup_btn, 1, 0)
 
         self.del_btn = QPushButton("🗑 Delete")
         self.del_btn.setObjectName("danger")
         self.del_btn.clicked.connect(self._on_delete_profile)
         self.del_btn.setEnabled(False)
-        btn_layout.addWidget(self.del_btn)
+        self.del_btn.setToolTip("Move this profile to the recoverable deleted history")
+        self.del_btn.setFixedHeight(30)
+        self.del_btn.setStyleSheet("font-size: 11px; padding: 4px 6px; background-color: #501818; color: #ffa0a0; border-color: #803030;")
+        btn_layout.addWidget(self.del_btn, 1, 1)
+
+        import_btn = QPushButton("📂 Import from…")
+        import_btn.clicked.connect(self._on_import_profiles)
+        import_btn.setToolTip("Import profiles from another VRProfileSwitcher data directory\n(e.g. a network share or backup folder)")
+        import_btn.setFixedHeight(30)
+        import_btn.setStyleSheet("font-size: 11px; padding: 4px 6px;")
+        btn_layout.addWidget(import_btn, 2, 0, 1, 2)  # full width, spans both columns
+
+        btn_layout.setColumnStretch(0, 1)
+        btn_layout.setColumnStretch(1, 1)
 
         layout.addWidget(btn_area)
         return w
@@ -657,6 +691,194 @@ class MainWindow(QMainWindow):
             except ValueError as e:
                 QMessageBox.warning(self, "Error", str(e))
 
+    def _on_import_profiles(self):
+        """Let the user pick a foreign VRProfileSwitcher data dir and import profiles from it."""
+        src_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select VRProfileSwitcher data directory to import from",
+            "",
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not src_dir:
+            return
+
+        src_path = Path(src_dir)
+        # Accept either the data/ dir itself or its profiles/ subdirectory
+        profiles_path = src_path / "profiles" if (src_path / "profiles").exists() else src_path
+
+        # Scan for valid profiles (dirs containing profile.json)
+        candidates = [
+            d for d in profiles_path.iterdir()
+            if d.is_dir()
+            and not d.name.startswith("__")
+            and (d / "profile.json").exists()
+        ]
+
+        if not candidates:
+            QMessageBox.warning(
+                self, "No Profiles Found",
+                f"No valid profiles found in:\n{profiles_path}\n\n"
+                "Make sure you selected the 'data' or 'data/profiles' folder "
+                "of a VRProfileSwitcher installation."
+            )
+            return
+
+        # Show a checklist dialog for the user to pick which to import
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import Profiles")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        existing_names = {p.name for p in self.pm.list_profiles()}
+
+        header = QLabel(f"Found {len(candidates)} profile(s) in:\n{profiles_path}")
+        header.setWordWrap(True)
+        header.setStyleSheet("color: #a0a0c0; font-size: 12px;")
+        layout.addWidget(header)
+
+        layout.addWidget(QLabel("Select profiles to import:"))
+
+        checkboxes: dict[str, tuple[QCheckBox, Path]] = {}
+        for d in sorted(candidates, key=lambda x: x.name):
+            clash = d.name in existing_names
+            label = d.name + (" (will be renamed — name already exists)" if clash else "")
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setFont(QFont("Segoe UI", 10))
+            if clash:
+                cb.setStyleSheet("color: #c0a040;")
+            layout.addWidget(cb)
+            checkboxes[d.name] = (cb, d)
+
+        sel_row = QHBoxLayout()
+        all_btn = QPushButton("Select All")
+        all_btn.setFixedWidth(90)
+        all_btn.clicked.connect(lambda: [v[0].setChecked(True) for v in checkboxes.values()])
+        none_btn = QPushButton("Select None")
+        none_btn.setFixedWidth(90)
+        none_btn.clicked.connect(lambda: [v[0].setChecked(False) for v in checkboxes.values()])
+        sel_row.addWidget(all_btn)
+        sel_row.addWidget(none_btn)
+        sel_row.addStretch()
+        layout.addLayout(sel_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #333;")
+        layout.addWidget(sep)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("📂  Import Selected")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if not dlg.exec():
+            return
+
+        selected = [(name, path) for name, (cb, path) in checkboxes.items() if cb.isChecked()]
+        if not selected:
+            return
+
+        imported, skipped, errors = [], [], []
+        for name, src in selected:
+            try:
+                final_name = self.pm.import_profile(src)
+                imported.append(final_name)
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+
+        self._refresh_profile_list()
+
+        summary_parts = []
+        if imported:
+            summary_parts.append(f"Imported: {', '.join(imported)}")
+        if errors:
+            summary_parts.append(f"Errors: {'; '.join(errors)}")
+
+        self._log(f"📂 Import complete — " + " | ".join(summary_parts))
+        self.status_bar.showMessage(f"Imported {len(imported)} profile(s)")
+
+        if errors:
+            QMessageBox.warning(self, "Import Errors",
+                "Some profiles could not be imported:\n" + "\n".join(errors))
+
+    def _on_restore_deleted(self):
+        deleted = self.pm.list_deleted_profiles()
+        if not deleted:
+            QMessageBox.information(
+                self, "Restore Deleted",
+                "No deleted profiles in history.\n\n"
+                "Deleted profiles are kept until the 5-profile limit is exceeded."
+            )
+            return
+
+        # Build a dialog listing deleted profiles to pick from
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Restore Deleted Profile")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(380)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(QLabel("Select a deleted profile to restore:"))
+
+        from PyQt6.QtWidgets import QListWidget
+        lst = QListWidget()
+        for display_name, path in deleted:
+            # Show the timestamp prefix in a friendly way
+            parts = path.name.split("_", 2)
+            if len(parts) == 3:
+                try:
+                    from datetime import datetime as dt
+                    ts = dt.strptime(f"{parts[0]}_{parts[1]}", "%Y%m%d_%H%M%S")
+                    friendly = ts.strftime("%d %b %Y %H:%M")
+                except Exception:
+                    friendly = parts[0]
+            else:
+                friendly = ""
+            lst.addItem(f"{display_name}  ({friendly})")
+        lst.setCurrentRow(0)
+        layout.addWidget(lst)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("↩  Restore")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if not dlg.exec():
+            return
+
+        idx = lst.currentRow()
+        if idx < 0:
+            return
+
+        display_name, deleted_path = deleted[idx]
+        try:
+            restored = self.pm.restore_deleted_profile(deleted_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to restore: {e}")
+            return
+
+        self._refresh_profile_list()
+        # Select the restored profile
+        for i in range(self.profile_list.count()):
+            item = self.profile_list.item(i)
+            if isinstance(item, ProfileListItem) and item.profile.name == restored.name:
+                self.profile_list.setCurrentItem(item)
+                break
+        self._log(f"✅ Restored deleted profile '{restored.name}'")
+        self.status_bar.showMessage(f"Profile '{restored.name}' restored")
+
     def _on_duplicate_profile(self):
         if not self._current_profile:
             return
@@ -726,15 +948,17 @@ class MainWindow(QMainWindow):
         name = self._current_profile.name
         reply = QMessageBox.question(
             self, "Delete Profile",
-            f"Delete profile '{name}' and all its saved configs?\nThis cannot be undone.",
+            f"Delete profile '{name}'?\n\n"
+            f"It will be kept in a rolling history (last 5 deleted profiles) "
+            f"and can be recovered via ↩ Restore Deleted…",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.pm.delete_profile(name)
             self._set_no_profile()
             self._refresh_profile_list()
-            self._log(f"🗑 Deleted profile '{name}'")
-            self.status_bar.showMessage(f"Profile '{name}' deleted")
+            self._log(f"🗑 Deleted profile '{name}' (recoverable via Restore Deleted…)")
+            self.status_bar.showMessage(f"Profile '{name}' deleted — recoverable")
 
     def _show_profile_context_menu(self, pos):
         item = self.profile_list.itemAt(pos)

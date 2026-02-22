@@ -132,6 +132,14 @@ class ResoniteModSettingsModule(VRModule):
 
         cfg_dir.mkdir(parents=True, exist_ok=True)
 
+        # Clear the entire rml_config/ dir first so mods not in this profile
+        # don't persist (e.g. a mod installed in profile A but not profile B).
+        for existing in cfg_dir.glob("*.json"):
+            try:
+                existing.unlink()
+            except Exception as e:
+                logger.warning(f"[{self.id}] Could not remove {existing.name}: {e}")
+
         restored = 0
         errors = []
         for src_file in module_src.glob("*.json"):
