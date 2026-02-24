@@ -41,12 +41,19 @@ from core.module_base import VRModule, ModuleStatus
 logger = logging.getLogger(__name__)
 
 # Files to save (in the base Resonite data dir)
+# NOTE: Data-log.litedb is the LiteDB write-ahead log (WAL).
+#   - On BACKUP: we save it alongside Data.litedb so the pair is consistent.
+#   - On RESTORE: we do NOT copy it back. Instead we delete any existing WAL
+#     so LiteDB starts with a clean "no uncommitted transactions" state.
+#     Restoring a WAL from a different point-in-time than the main DB causes
+#     LiteDB to see an inconsistency → Resonite crashes → wipes the database.
 SAVE_FILES = [
     "Data.litedb",
-    "Data-log.litedb",
+    "Data-log.litedb",   # backed up for consistency, but NOT restored (see above)
     "Data.version",
     "LocalKey.bin",
 ]
+
 
 # Directories to save
 SAVE_DIRS = [
@@ -66,6 +73,20 @@ def _resonite_base() -> Path:
     """
     userprofile = os.environ.get("USERPROFILE", str(Path.home()))
     return Path(userprofile) / "AppData" / "LocalLow" / "Yellow Dog Man Studios" / "Resonite"
+
+
+def _resonite_is_running() -> bool:
+    """Return True if Resonite.exe is currently running."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq Resonite.exe", "/NH"],
+            stderr=subprocess.DEVNULL,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        ).decode(errors="ignore")
+        return "Resonite.exe" in out
+    except Exception:
+        return False
 
 
 class ResoniteModule(VRModule):
@@ -107,6 +128,11 @@ class ResoniteModule(VRModule):
         )
 
     def backup(self, dest_dir: Path) -> tuple[bool, str]:
+        if _resonite_is_running():
+            return False, (
+                "Resonite is currently running. Close it before saving a profile — "
+                "the LiteDB database may be mid-write and the backup would be unreliable."
+            )
         base = self._base()
         if not base.exists():
             return False, f"Resonite data directory not found: {base}"
@@ -156,10 +182,31 @@ class ResoniteModule(VRModule):
         if not module_src.exists():
             return False, "No Resonite backup found in this profile"
 
+        if _resonite_is_running():
+            return False, (
+                "Resonite is currently running. Close it before restoring a profile — "
+                "restoring the database while Resonite holds a file lock will corrupt it."
+            )
+
         base = self._base()
         base.mkdir(parents=True, exist_ok=True)
         restored = []
         errors = []
+
+        # WAL handling: if the backup contains Data-log.litedb it was saved
+        # together with Data.litedb while Resonite was closed (consistent pair),
+        # so restore both normally. If the backup has no WAL, delete any existing
+        # one on disk — a stale WAL from a different DB state would cause LiteDB
+        # to see an inconsistency and Resonite to wipe the database.
+        backup_has_wal = (module_src / "Data-log.litedb").exists()
+        if not backup_has_wal:
+            wal = base / "Data-log.litedb"
+            if wal.exists():
+                try:
+                    wal.unlink()
+                    logger.info("[resonite] Backup has no WAL — deleted existing Data-log.litedb to avoid DB mismatch")
+                except Exception as e:
+                    logger.warning(f"[resonite] Could not delete existing WAL: {e}")
 
         for fname in SAVE_FILES:
             src = module_src / fname

@@ -33,6 +33,24 @@ from modules.resonite_mod_settings import _find_resonite_install
 logger = logging.getLogger(__name__)
 
 
+def _force_rmtree(path: Path) -> None:
+    """
+    Remove a directory tree, forcing deletion of read-only files.
+    Required for files in Program Files which Windows marks read-only.
+    """
+    import stat
+
+    def _on_error(func, p, exc_info):
+        # Clear read-only flag and retry
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception as e:
+            logger.warning(f"Could not remove {p}: {e}")
+
+    shutil.rmtree(path, onerror=_on_error)
+
+
 def _resolute_appdata() -> Path:
     """Resolute is a Tauri app; on Windows it stores data in %APPDATA%\\Resolute."""
     appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
@@ -98,7 +116,7 @@ class ResoluteModule(VRModule):
         resolute_dest = module_dest / "resolute_appdata"
         if resolute_appdata.exists():
             if resolute_dest.exists():
-                shutil.rmtree(resolute_dest)
+                _force_rmtree(resolute_dest)
             shutil.copytree(resolute_appdata, resolute_dest)
             summary.append("Resolute settings")
             logger.info(f"[{self.id}] Backed up Resolute app data from {resolute_appdata}")
@@ -160,7 +178,7 @@ class ResoluteModule(VRModule):
             try:
                 resolute_dst.mkdir(parents=True, exist_ok=True)
                 if resolute_dst.exists():
-                    shutil.rmtree(resolute_dst)
+                    _force_rmtree(resolute_dst)
                 shutil.copytree(resolute_src, resolute_dst)
                 summary.append("Resolute settings restored")
             except Exception as e:
@@ -180,7 +198,7 @@ class ResoluteModule(VRModule):
                         dst_sub = base / subdir
                         try:
                             if dst_sub.exists():
-                                shutil.rmtree(dst_sub)
+                                _force_rmtree(dst_sub)
                             shutil.copytree(src_sub, dst_sub)
                             count = len(list(src_sub.iterdir()))
                             summary.append(f"{subdir}/ ({count} files)")
