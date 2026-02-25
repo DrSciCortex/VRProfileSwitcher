@@ -13,6 +13,8 @@ DEFAULT_SETTINGS = {
     "log_level": "INFO",
     "window_geometry": "",
     "last_profile": "",
+    # Ordered list of active profile names: index 0 = lowest priority, last = highest
+    "active_stack": [],
 }
 
 
@@ -43,6 +45,47 @@ class AppSettings:
     def set(self, key: str, value):
         self._data[key] = value
         self.save()
+
+    # ------------------------------------------------------------------ #
+    # Stack helpers                                                        #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def active_stack(self) -> list[str]:
+        """Ordered list of active profile names (index 0 = lowest priority)."""
+        return self._data.get("active_stack", [])
+
+    def stack_push(self, name: str):
+        """Add a profile to the top of the stack (highest priority). No-op if already present."""
+        stack = self.active_stack
+        if name not in stack:
+            stack.append(name)
+        else:
+            # Move to top
+            stack.remove(name)
+            stack.append(name)
+        self.set("active_stack", stack)
+
+    def stack_remove(self, name: str):
+        """Remove a profile from the stack."""
+        stack = [n for n in self.active_stack if n != name]
+        self.set("active_stack", stack)
+
+    def stack_move_up(self, name: str):
+        """Increase priority of a profile (move toward end of list)."""
+        stack = list(self.active_stack)
+        idx = stack.index(name)
+        if idx < len(stack) - 1:
+            stack[idx], stack[idx + 1] = stack[idx + 1], stack[idx]
+            self.set("active_stack", stack)
+
+    def stack_move_down(self, name: str):
+        """Decrease priority of a profile (move toward start of list)."""
+        stack = list(self.active_stack)
+        idx = stack.index(name)
+        if idx > 0:
+            stack[idx], stack[idx - 1] = stack[idx - 1], stack[idx]
+            self.set("active_stack", stack)
 
     def __getitem__(self, key):
         return self._data[key]

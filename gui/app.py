@@ -21,7 +21,7 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QAction, QIcon
 
 from core.profile_manager import Profile, ProfileManager
 from core.settings import AppSettings
-from core.switcher import Switcher, ModuleConflict, OperationResult
+from core.switcher import Switcher, ModuleConflict, StackConflict, OperationResult
 from modules import MODULE_REGISTRY, get_module
 from gui.profile_editor import ProfileEditorDialog
 from gui.conflict_dialog import ConflictDialog
@@ -204,10 +204,70 @@ class WorkerThread(QThread):
         self.finished.emit(result)
 
 
+class _SeparatorItem(QListWidgetItem):
+    """Non-selectable, non-draggable divider between active and inactive profiles."""
+    def __init__(self, text: str = "─── other profiles ───"):
+        super().__init__(text)
+        self.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.setForeground(QColor("#404060"))
+        font = QFont("Segoe UI", 9)
+        font.setItalic(True)
+        self.setFont(font)
+        self.setSizeHint(QSize(0, 28))
+
+
+class _ProfileListWidget(QListWidget):
+    """
+    Active profiles pinned to top in priority order (#1 at top = highest priority).
+    Separator divides active from inactive. Drag-to-reorder within active section only.
+    """
+    def __init__(self, on_reorder, parent=None):
+        super().__init__(parent)
+        self._on_reorder = on_reorder
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+    def _separator_row(self) -> int:
+        for i in range(self.count()):
+            if isinstance(self.item(i), _SeparatorItem):
+                return i
+        return -1
+
+    def dropEvent(self, event):
+        target_row = self.indexAt(event.position().toPoint()).row()
+        sep = self._separator_row()
+        source_row = self.currentRow()
+        source_item = self.item(source_row)
+        is_active = (
+            isinstance(source_item, ProfileListItem)
+            and source_item.stack_priority is not None
+        )
+        # Only active profiles can be dragged, and only within the active section
+        if not is_active or (sep >= 0 and target_row >= sep):
+            event.ignore()
+            return
+        before = self._active_order()
+        super().dropEvent(event)
+        after = self._active_order()
+        if before != after:
+            self._on_reorder(after)
+
+    def _active_order(self) -> list[str]:
+        """Active profile names in visual order (index 0 = top = highest priority)."""
+        names = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if isinstance(item, ProfileListItem) and item.stack_priority is not None:
+                names.append(item.profile.name)
+        return names
+
+
 class ProfileListItem(QListWidgetItem):
-    def __init__(self, profile: Profile):
+    def __init__(self, profile: Profile, stack_priority: int | None = None):
         super().__init__()
         self.profile = profile
+        self.stack_priority = stack_priority  # None = not active; 1 = highest, 2 = next, etc.
         self._refresh()
 
     def _refresh(self):
@@ -218,7 +278,14 @@ class ProfileListItem(QListWidgetItem):
             if cls:
                 icons.append(cls.icon)
         icon_str = " ".join(icons) if icons else "○"
-        self.setText(f"  {self.profile.name}\n  {icon_str}")
+
+        if self.stack_priority is not None:
+            badge = f"  🟢 #{self.stack_priority} ACTIVE"
+            self.setText(f"  {self.profile.name}{badge}\n  {icon_str}")
+            self.setForeground(QColor("#80ffb0"))
+        else:
+            self.setText(f"  {self.profile.name}\n  {icon_str}")
+            self.setForeground(QColor("#d4d4e8"))
         self.setSizeHint(QSize(0, 56))
 
 
@@ -300,12 +367,15 @@ class MainWindow(QMainWindow):
         self.switcher = Switcher(pm)
         self._current_profile: Optional[Profile] = None
         self._worker: Optional[WorkerThread] = None
+        # Active stack: ordered list of Profile objects (index 0 = lowest priority)
+        self._active_stack: list[Profile] = []
 
         self.setWindowTitle("VRProfile Switcher")
         self.setMinimumSize(820, 560)
         self.setStyleSheet(DARK_STYLESHEET)
 
         self._build_ui()
+        self._load_active_stack()
         self._refresh_profile_list()
 
         # Restore window geometry
@@ -378,8 +448,8 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(logo_area)
 
-        # Profile list
-        self.profile_list = QListWidget()
+        # Profile list — drag-to-reorder active stack priority
+        self.profile_list = _ProfileListWidget(on_reorder=self._on_stack_reorder)
         self.profile_list.setFont(QFont("Segoe UI", 10))
         self.profile_list.currentItemChanged.connect(self._on_profile_selected)
         self.profile_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -494,7 +564,7 @@ class MainWindow(QMainWindow):
         self.partial_backup_btn.setToolTip("Choose which modules to save into this profile")
         action_layout.addWidget(self.partial_backup_btn)
 
-        self.load_btn = QPushButton("▶  Load This Profile")
+        self.load_btn = QPushButton("▶  Load / Add to Stack")
         self.load_btn.setObjectName("success")
         self.load_btn.setEnabled(False)
         self.load_btn.clicked.connect(self._on_load_profile)
@@ -571,10 +641,32 @@ class MainWindow(QMainWindow):
     def _refresh_profile_list(self):
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
-        profiles = self.pm.list_profiles()
-        for p in profiles:
-            item = ProfileListItem(p)
+
+        # Active profiles: top of list in priority order (#1 at top = highest priority)
+        # Internal stack is low→high, so reversed() gives highest first
+        active_in_order = list(reversed(self._active_stack))  # [highest, ..., lowest]
+        active_names = {p.name for p in self._active_stack}
+
+        priority_map: dict[str, int] = {}
+        for i, p in enumerate(active_in_order):
+            priority_map[p.name] = i + 1  # 1 = highest
+
+        # Add active profiles first (in priority order)
+        for p in active_in_order:
+            item = ProfileListItem(p, stack_priority=priority_map[p.name])
             self.profile_list.addItem(item)
+
+        # Separator (only if there are both active and inactive profiles)
+        all_profiles = self.pm.list_profiles()
+        inactive = [p for p in all_profiles if p.name not in active_names]
+        if active_in_order and inactive:
+            self.profile_list.addItem(_SeparatorItem())
+
+        # Inactive profiles below separator, sorted by last_used as before
+        for p in inactive:
+            item = ProfileListItem(p, stack_priority=None)
+            self.profile_list.addItem(item)
+
         self.profile_list.blockSignals(False)
 
         # Re-select last used
@@ -590,6 +682,7 @@ class MainWindow(QMainWindow):
             self.profile_list.setCurrentRow(0)
 
         self._update_undo_btn()
+        self._update_stack_status_bar()
 
     def _on_profile_selected(self, current: QListWidgetItem, previous):
         if not isinstance(current, ProfileListItem):
@@ -608,7 +701,19 @@ class MainWindow(QMainWindow):
         self.del_btn.setEnabled(True)
         self.backup_btn.setEnabled(True)
         self.partial_backup_btn.setEnabled(True)
+
+        # Load / Unload button state
+        in_stack = any(p.name == profile.name for p in self._active_stack)
+        if in_stack:
+            self.load_btn.setText("⏏  Unload from Stack")
+            self.load_btn.setObjectName("danger")
+        else:
+            self.load_btn.setText("▶  Load / Add to Stack")
+            self.load_btn.setObjectName("success")
         self.load_btn.setEnabled(True)
+        # Force style refresh
+        self.load_btn.style().unpolish(self.load_btn)
+        self.load_btn.style().polish(self.load_btn)
 
         # Update module checkboxes
         for mid, widgets in self._module_rows.items():
@@ -625,6 +730,10 @@ class MainWindow(QMainWindow):
         self.del_btn.setEnabled(False)
         self.backup_btn.setEnabled(False)
         self.load_btn.setEnabled(False)
+        self.load_btn.setText("▶  Load / Add to Stack")
+        self.load_btn.setObjectName("success")
+        self.load_btn.style().unpolish(self.load_btn)
+        self.load_btn.style().polish(self.load_btn)
         for widgets in self._module_rows.values():
             widgets["checkbox"].setChecked(False)
 
@@ -954,6 +1063,30 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            # Unload from stack first so module state is properly reverted
+            # (e.g. Resonite launch args handed to next stack entry or cleared)
+            was_active = any(p.name == name for p in self._active_stack)
+            if was_active:
+                profile_obj = self._current_profile
+                remaining = [p for p in self._active_stack if p.name != name]
+                self.settings.stack_remove(name)
+                self._active_stack = remaining[:]
+                def _do_cleanup(progress):
+                    return self.switcher.unload_from_stack(
+                        profile=profile_obj,
+                        remaining_stack=remaining,
+                        progress=progress,
+                    )
+                def _on_cleanup_done(result):
+                    self._set_busy(False)
+                    for w in result.warnings:
+                        self._log(f"⚠ {w}")
+                    if result.errors:
+                        self._log_errors(result)
+                self._set_busy(True)
+                self._log(f"⏏ Unloading '{name}' from stack before delete...")
+                self._run_worker(_do_cleanup, on_done=_on_cleanup_done)
+
             self.pm.delete_profile(name)
             self._set_no_profile()
             self._refresh_profile_list()
@@ -980,7 +1113,11 @@ class MainWindow(QMainWindow):
     def _on_backup(self):
         if not self._current_profile:
             return
-        profile = self._current_profile
+
+        profile = self._choose_save_target(self._current_profile, "all")
+        if profile is None:
+            return
+
         if self.settings.get("confirm_before_restore", True):
             reply = QMessageBox.question(
                 self, "Save Current Config",
@@ -1003,7 +1140,10 @@ class MainWindow(QMainWindow):
         """Show a dialog to pick which modules to save, then back up only those."""
         if not self._current_profile:
             return
-        profile = self._current_profile
+
+        profile = self._choose_save_target(self._current_profile, "selected")
+        if profile is None:
+            return
 
         dlg = PartialSaveDialog(self, profile=profile)
         if not dlg.exec():
@@ -1019,7 +1159,6 @@ class MainWindow(QMainWindow):
         self._log(f"💾 Saving selected modules to '{profile.name}': {names}...")
 
         def do_partial_backup(progress):
-            # Temporarily override enabled modules for this backup
             import copy
             from core.switcher import OperationResult
             result = OperationResult(success=True)
@@ -1043,6 +1182,46 @@ class MainWindow(QMainWindow):
 
         self._run_worker(do_partial_backup, on_done=self._on_backup_done)
 
+    def _choose_save_target(self, selected_profile: Profile, mode: str) -> Profile | None:
+        """
+        When multiple profiles are active in the stack, ask the user which one
+        to save current live config into. Returns the chosen Profile, or None to cancel.
+        If only one profile is active (or none), returns `selected_profile` directly.
+        """
+        active_names = {p.name for p in self._active_stack}
+        if len(self._active_stack) <= 1:
+            return selected_profile
+
+        # If the currently selected profile is in the stack, suggest it as default
+        if selected_profile.name in active_names:
+            default = selected_profile
+        else:
+            default = self._active_stack[-1]  # highest priority
+
+        # Build choice list: active stack members (high→low), plus currently selected if not in stack
+        candidates = list(reversed(self._active_stack))
+        if selected_profile.name not in active_names:
+            candidates.insert(0, selected_profile)
+
+        items = [
+            f"{p.name}  [{', '.join(p.enabled_modules()) or 'no modules'}]"
+            for p in candidates
+        ]
+        default_idx = next((i for i, p in enumerate(candidates) if p.name == default.name), 0)
+
+        from PyQt6.QtWidgets import QInputDialog
+        item, ok = QInputDialog.getItem(
+            self, "Save Into Which Profile?",
+            f"Multiple profiles are active. Choose which profile to save {'modules' if mode == 'all' else 'selected modules'} into:",
+            items,
+            default_idx,
+            editable=False,
+        )
+        if not ok:
+            return None
+        chosen_idx = items.index(item)
+        return candidates[chosen_idx]
+
     def _on_backup_done(self, result: OperationResult):
         self._set_busy(False)
         if result.success:
@@ -1061,37 +1240,137 @@ class MainWindow(QMainWindow):
             return
         profile = self._current_profile
 
+        # Toggle: if already in stack, unload it
+        if any(p.name == profile.name for p in self._active_stack):
+            self._do_unload_profile(profile)
+            return
+
+        self._do_load_profile(profile)
+
+    def _do_load_profile(self, profile: Profile):
+        """Add `profile` to the active stack (or replace if it overlaps)."""
         if not profile.enabled_modules():
             QMessageBox.information(self, "No Modules", "This profile has no modules enabled. Edit it first.")
             return
 
-        # Conflict check
-        conflicts = self.switcher.check_conflicts(profile)
-        if conflicts:
-            forced = self._show_conflict_dialog(conflicts, profile)
+        # Check for module overlaps with current stack
+        stack_conflicts = self.switcher.check_stack_conflicts(profile, self._active_stack)
+        if stack_conflicts:
+            conflicting_profiles = sorted({sc.active_profile for sc in stack_conflicts})
+            conflict_lines = "\n".join(
+                f"  • {sc.display_name}  (currently owned by '{sc.active_profile}')"
+                for sc in stack_conflicts
+            )
+            reply = QMessageBox.question(
+                self, "Module Overlap",
+                f"'{profile.name}' shares modules with profiles already in the stack:\n\n"
+                f"{conflict_lines}\n\n"
+                f"'{profile.name}' will take priority and override those modules.\n"
+                f"The overlapping profiles stay in the stack at lower priority.\n\n"
+                f"Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Check for running-app conflicts
+        app_conflicts = self.switcher.check_conflicts(profile)
+        if app_conflicts:
+            forced = self._show_conflict_dialog(app_conflicts, profile)
             if not forced:
                 return
 
         if self.settings.get("confirm_before_restore", True):
             auto_note = " The current state will be auto-backed up first." if self.settings.get("auto_backup_before_restore", True) else ""
+            stack_desc = ""
+            if self._active_stack:
+                names = ", ".join(p.name for p in reversed(self._active_stack))
+                stack_desc = f"\n\nCurrently active: {names}"
             reply = QMessageBox.question(
-                self, "Load Profile",
-                f"Load profile '{profile.name}'?{auto_note}\n\n"
-                f"Modules: {', '.join(profile.enabled_modules())}",
+                self, "Add to Stack",
+                f"Load '{profile.name}' (modules: {', '.join(profile.enabled_modules())})?{auto_note}{stack_desc}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
         self._set_busy(True)
-        self._log(f"▶ Loading profile '{profile.name}'...")
+        self._log(f"▶ Loading '{profile.name}' into stack...")
 
+        current_stack = list(self._active_stack)
         auto_backup = self.settings.get("auto_backup_before_restore", True)
 
         def do_load(progress):
-            return self.switcher.load_profile(profile, auto_backup_first=auto_backup, progress=progress)
+            return self.switcher.load_into_stack(
+                incoming=profile,
+                current_stack=current_stack,
+                auto_backup_first=auto_backup,
+                progress=progress,
+            )
 
-        self._run_worker(do_load, on_done=self._on_load_done)
+        def on_done(result: OperationResult):
+            self._set_busy(False)
+            self._update_undo_btn()
+            if result.success:
+                # Commit stack change
+                self.settings.stack_push(profile.name)
+                self._load_active_stack()
+                self._refresh_profile_list()
+                self._force_show_profile(profile.name)
+                self._log(f"✅ '{profile.name}' added to stack — {result.summary}")
+                for w in result.warnings:
+                    self._log(f"⚠ {w}")
+                self.status_bar.showMessage(f"Stack: {self._stack_summary()}")
+                self._refresh_status_indicators()
+            else:
+                self._log_errors(result)
+                self.status_bar.showMessage("Load had errors — check log")
+
+        self._run_worker(do_load, on_done=on_done)
+
+    def _do_unload_profile(self, profile: Profile):
+        """Remove `profile` from the active stack, falling back to lower-priority profiles."""
+        reply = QMessageBox.question(
+            self, "Unload Profile",
+            f"Unload '{profile.name}' from the active stack?\n\n"
+            f"Modules it owns will revert to the next lower profile in the stack,\n"
+            f"or to defaults if nothing else covers them.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Build remaining stack (without this profile)
+        remaining = [p for p in self._active_stack if p.name != profile.name]
+
+        self._set_busy(True)
+        self._log(f"⏏ Unloading '{profile.name}' from stack...")
+
+        def do_unload(progress):
+            return self.switcher.unload_from_stack(
+                profile=profile,
+                remaining_stack=remaining,
+                progress=progress,
+            )
+
+        def on_done(result: OperationResult):
+            self._set_busy(False)
+            # Commit stack change regardless of partial errors
+            self.settings.stack_remove(profile.name)
+            self._load_active_stack()
+            self._refresh_profile_list()
+            if self._current_profile:
+                self._force_show_profile(self._current_profile.name)
+            if result.success or not result.errors:
+                self._log(f"✅ '{profile.name}' unloaded — {result.summary}")
+            else:
+                self._log_errors(result)
+            for w in result.warnings:
+                self._log(f"⚠ {w}")
+            self.status_bar.showMessage(f"Stack: {self._stack_summary()}")
+            self._refresh_status_indicators()
+
+        self._run_worker(do_unload, on_done=on_done)
 
     def _show_conflict_dialog(self, conflicts: list[ModuleConflict], profile: Profile) -> bool:
         """Returns True if user chose to proceed (either conflicts cleared or forced)."""
@@ -1101,20 +1380,6 @@ class MainWindow(QMainWindow):
         dlg = ConflictDialog(self, conflicts=conflicts, recheck_fn=recheck)
         dlg.exec()
         return dlg.result() in (1, 2)  # QDialog.Accepted or forced
-
-    def _on_load_done(self, result: OperationResult):
-        self._set_busy(False)
-        self._update_undo_btn()
-        if result.success:
-            self._log(f"✅ Profile loaded — {result.summary}")
-            if result.warnings:
-                for w in result.warnings:
-                    self._log(f"⚠ {w}")
-            self.status_bar.showMessage(f"Profile '{self._current_profile.name}' loaded")
-            self._refresh_status_indicators()
-        else:
-            self._log_errors(result)
-            self.status_bar.showMessage("Load had errors — check log")
 
     # ------------------------------------------------------------------
     # Undo last switch
@@ -1184,6 +1449,133 @@ class MainWindow(QMainWindow):
         for mod_id, (ok, msg) in result.module_results.items():
             if not ok:
                 self._log(f"   {mod_id}: {msg}")
+
+    # ------------------------------------------------------------------
+    # Active stack helpers
+    # ------------------------------------------------------------------
+
+    def _on_stack_reorder(self, new_active_order: list[str]):
+        """
+        Called by _ProfileListWidget when the user drags active profiles into a new order.
+        new_active_order is the names of active profiles in new visual order (top = shown first,
+        but we need to decide convention). We treat visual top = lowest priority so that
+        dragging a profile UP means it now loads LATER (higher priority).
+        Actually: visual top-to-bottom = high-to-low priority makes more intuitive sense
+        (profile at top "wins"). So: new_active_order[0] = highest priority = last in stack.
+        """
+        if not new_active_order:
+            return
+
+        # new_active_order: top of list = index 0 = highest priority shown first
+        # internal stack: last = highest priority
+        # So reverse: stack order = reversed(new_active_order)
+        new_stack_order = list(reversed(new_active_order))  # [lowest, ..., highest]
+
+        old_stack_order = [p.name for p in self._active_stack]
+        if new_stack_order == old_stack_order:
+            return
+
+        # Check if Resonite module is involved — requires Steam to be closed
+        resonite_profiles = [
+            name for name in new_stack_order
+            if (p := self.pm.get_profile(name)) and p.is_module_enabled("resonite")
+        ]
+        if resonite_profiles:
+            # Check Steam running
+            try:
+                from modules.resonite import _steam_is_running
+                if _steam_is_running():
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self, "Steam is Running",
+                        "Reordering Resonite profiles requires updating Steam launch options.\n\n"
+                        "Please close Steam first, then drag to reorder.",
+                    )
+                    self._refresh_profile_list()  # revert visual order
+                    return
+            except Exception as e:
+                logger.warning(f"Steam check failed: {e}")
+
+        # Commit new order to settings
+        # Keep non-active profiles out of stack list — only active ones get reordered
+        self.settings.set("active_stack", new_stack_order)
+        self._load_active_stack()
+
+        # If Resonite is in the stack, re-apply the winning profile's launch args
+        if resonite_profiles:
+            resolution = self.switcher.resolve_stack(self._active_stack)
+            winning = resolution.get("resonite")
+            if winning:
+                self._set_busy(True)
+                self._log(f"🔄 Reordered stack — re-applying Resonite args from '{winning.name}'...")
+                src_dir = self.pm.profile_dir(winning.name)
+
+                def do_reapply(progress):
+                    from core.switcher import OperationResult
+                    result = OperationResult(success=True)
+                    try:
+                        from modules import get_module
+                        mod = get_module("resonite", winning.get_module_options("resonite"))
+                        ok, msg = mod.restore(src_dir)
+                        result.module_results["resonite"] = (ok, msg)
+                        if not ok:
+                            result.success = False
+                            result.errors.append(f"Resonite: {msg}")
+                    except Exception as e:
+                        result.success = False
+                        result.errors.append(str(e))
+                    return result
+
+                def on_done(result):
+                    self._set_busy(False)
+                    if result.success:
+                        self._log(f"✅ Resonite launch args updated to '{winning.name}'")
+                    else:
+                        self._log_errors(result)
+                    self._refresh_profile_list()
+                    if self._current_profile:
+                        self._force_show_profile(self._current_profile.name)
+
+                self._run_worker(do_reapply, on_done=on_done)
+                return
+
+        self._refresh_profile_list()
+        if self._current_profile:
+            self._force_show_profile(self._current_profile.name)
+        self.status_bar.showMessage(f"Stack reordered — {self._stack_summary()}")
+
+    def _force_show_profile(self, name: str):
+        """Re-load profile from disk and show it, ensuring fresh stack state is reflected."""
+        p = self.pm.get_profile(name)
+        if p:
+            self._current_profile = p
+            self._show_profile(p)
+
+    def _load_active_stack(self):
+        """Re-build _active_stack from settings, dropping any profiles that no longer exist."""
+        names = self.settings.active_stack
+        stack = []
+        cleaned = False
+        for name in names:
+            p = self.pm.get_profile(name)
+            if p:
+                stack.append(p)
+            else:
+                cleaned = True
+                logger.warning(f"Active stack: profile '{name}' no longer exists — removing")
+        self._active_stack = stack
+        if cleaned:
+            self.settings.set("active_stack", [p.name for p in stack])
+
+    def _stack_summary(self) -> str:
+        if not self._active_stack:
+            return "No profiles active"
+        # High→low
+        names = [p.name for p in reversed(self._active_stack)]
+        return "Active: " + " › ".join(names)
+
+    def _update_stack_status_bar(self):
+        self.status_bar.showMessage(self._stack_summary())
 
     # ------------------------------------------------------------------
     # Window lifecycle
