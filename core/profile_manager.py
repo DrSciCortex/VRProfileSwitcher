@@ -32,6 +32,7 @@ DEFAULT_MODULE_CONFIG = {
     "resolute":                 {"enabled": False, "options": {"save_dlls": True}},
     "eyetrackvr":               {"enabled": False, "options": {"include_vrcft_module": True}},
     "babble":                   {"enabled": False, "options": {"include_vrcft_module": True}},
+            "virtual_desktop":          {"enabled": False, "options": {}},
 }
 
 

@@ -13,6 +13,7 @@ from modules.resonite_mod_settings import ResoniteModSettingsModule
 from modules.resolute import ResoluteModule
 from modules.eyetrackvr import EyeTrackVRModule
 from modules.babble import BabbleModule
+from modules.virtual_desktop import VirtualDesktopModule
 
 # Ordered list of available modules -- order determines GUI display order
 MODULE_REGISTRY: dict[str, type] = {
@@ -23,6 +24,7 @@ MODULE_REGISTRY: dict[str, type] = {
     ResoluteModule.id:              ResoluteModule,
     EyeTrackVRModule.id:            EyeTrackVRModule,
     BabbleModule.id:                BabbleModule,
+    VirtualDesktopModule.id:        VirtualDesktopModule,
 }
 
 
