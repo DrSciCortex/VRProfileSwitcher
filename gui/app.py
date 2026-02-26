@@ -1063,9 +1063,24 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            # Unload from stack first so module state is properly reverted
-            # (e.g. Resonite launch args handed to next stack entry or cleared)
+            # If active and owns Resonite, Steam must be closed before we can
+            # remove its launch args
             was_active = any(p.name == name for p in self._active_stack)
+            if was_active and self._current_profile.is_module_enabled("resonite"):
+                try:
+                    from modules.resonite import _steam_is_running
+                    if _steam_is_running():
+                        QMessageBox.warning(
+                            self, "Steam is Running",
+                            f"Cannot delete '{name}' while Steam is running.\n\n"
+                            f"This profile owns the Resonite module. Deleting it requires "
+                            f"removing its -DataPath/-CachePath launch options, which needs "
+                            f"Steam to be closed.\n\nPlease close Steam and try again.",
+                        )
+                        return
+                except Exception as e:
+                    logger.warning(f"Steam check failed: {e}")
+
             if was_active:
                 profile_obj = self._current_profile
                 remaining = [p for p in self._active_stack if p.name != name]
@@ -1330,6 +1345,22 @@ class MainWindow(QMainWindow):
 
     def _do_unload_profile(self, profile: Profile):
         """Remove `profile` from the active stack, falling back to lower-priority profiles."""
+        # If this profile owns the Resonite module, Steam must be closed first
+        if profile.is_module_enabled("resonite"):
+            try:
+                from modules.resonite import _steam_is_running
+                if _steam_is_running():
+                    QMessageBox.warning(
+                        self, "Steam is Running",
+                        f"Cannot unload '{profile.name}' while Steam is running.\n\n"
+                        f"Unloading a Resonite profile removes its -DataPath/-CachePath "
+                        f"launch options, which requires Steam to be closed.\n\n"
+                        f"Please close Steam and try again.",
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Steam check failed: {e}")
+
         reply = QMessageBox.question(
             self, "Unload Profile",
             f"Unload '{profile.name}' from the active stack?\n\n"
@@ -1355,16 +1386,18 @@ class MainWindow(QMainWindow):
 
         def on_done(result: OperationResult):
             self._set_busy(False)
-            # Commit stack change regardless of partial errors
+            if not result.success and result.errors:
+                # Operation failed — do NOT commit the stack change
+                self._log_errors(result)
+                self.status_bar.showMessage("Unload failed — stack unchanged")
+                return
+            # Commit stack change only on success
             self.settings.stack_remove(profile.name)
             self._load_active_stack()
             self._refresh_profile_list()
             if self._current_profile:
                 self._force_show_profile(self._current_profile.name)
-            if result.success or not result.errors:
-                self._log(f"✅ '{profile.name}' unloaded — {result.summary}")
-            else:
-                self._log_errors(result)
+            self._log(f"✅ '{profile.name}' unloaded — {result.summary}")
             for w in result.warnings:
                 self._log(f"⚠ {w}")
             self.status_bar.showMessage(f"Stack: {self._stack_summary()}")

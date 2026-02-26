@@ -49,45 +49,68 @@ RESONITE_APP_ID = "2519830"
 # ---------------------------------------------------------------------------
 
 def _steam_root() -> Path | None:
-    """Find Steam installation root from registry."""
+    """Find Steam installation root, trying registry then common fallback paths."""
+    # Primary: Windows registry (most reliable)
     try:
         import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                             r"SOFTWARE\WOW6432Node\Valve\Steam")
-        path, _ = winreg.QueryValueEx(key, "InstallPath")
-        return Path(path)
-    except Exception:
-        pass
-    # Fallback common paths
-    for candidate in [
+        for reg_path in [
+            r"SOFTWARE\WOW6432Node\Valve\Steam",   # 64-bit OS
+            r"SOFTWARE\Valve\Steam",                # 32-bit OS
+        ]:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+                path, _ = winreg.QueryValueEx(key, "InstallPath")
+                result = Path(path)
+                logger.debug(f"[resonite] Steam root from registry ({reg_path}): {result}")
+                return result
+            except OSError:
+                continue
+    except ImportError:
+        logger.debug("[resonite] winreg not available (not on Windows?)")
+    except Exception as e:
+        logger.warning(f"[resonite] Registry lookup failed: {e}")
+
+    # Fallback: common install locations
+    candidates = [
         Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Steam",
-        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Steam",
-    ]:
-        if candidate.exists():
+        Path(os.environ.get("PROGRAMFILES",       "C:/Program Files"))       / "Steam",
+        Path(os.environ.get("LOCALAPPDATA", ""))  / "Steam",
+        Path("C:/Steam"),
+        Path("D:/Steam"),
+        Path("E:/Steam"),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "userdata").exists():
+            logger.info(f"[resonite] Steam root found via fallback path: {candidate}")
             return candidate
+
+    logger.warning("[resonite] Could not locate Steam installation.")
     return None
 
 
 def _find_active_userid(steam_root: Path) -> str | None:
     """
-    Return the 32-bit account ID of the most-recently-active Steam user,
-    by reading loginusers.vdf which Steam maintains with a MostRecent flag.
+    Return the userdata folder name (32-bit account ID) for the most-recently-
+    active Steam account, by reading loginusers.vdf (MostRecent flag).
     Returns None if unreadable or no MostRecent entry found.
     """
     loginusers = steam_root / "config" / "loginusers.vdf"
     if not loginusers.exists():
+        logger.warning(f"[resonite] loginusers.vdf not found at {loginusers}")
         return None
+
     try:
         text = loginusers.read_text(encoding="utf-8", errors="replace")
-        # VDF format: "76561198xxxxxxxxx" { ... "MostRecent" "1" ... }
-        # Match each top-level user block (steam64 id + braced block)
+        # VDF: "76561198xxxxxxxxx" { ... "MostRecent" "1" ... }
         block_pat = re.compile(r'"(\d+)"\s*\{([^}]*)\}', re.DOTALL)
         most_recent_pat = re.compile(r'"MostRecent"\s+"1"', re.IGNORECASE)
         for m in block_pat.finditer(text):
             steam64, block = m.group(1), m.group(2)
             if most_recent_pat.search(block):
-                # Convert Steam64 to 32-bit account ID (lower 32 bits)
-                return str(int(steam64) & 0xFFFFFFFF)
+                account_id = str(int(steam64) & 0xFFFFFFFF)
+                logger.info(f"[resonite] Most-recent Steam user: steam64={steam64} → userid={account_id}")
+                return account_id
+        logger.warning("[resonite] No MostRecent entry found in loginusers.vdf")
     except Exception as e:
         logger.warning(f"[resonite] Could not read loginusers.vdf: {e}")
     return None
@@ -95,30 +118,58 @@ def _find_active_userid(steam_root: Path) -> str | None:
 
 def _find_localconfig_vdfs() -> list[Path]:
     """
-    Return localconfig.vdf for the most-recently-active Steam user only.
-    Writing to all user VDFs on a shared PC would clobber other accounts launch
-    options, so we restrict to the account Steam most recently logged in as.
-    Falls back to all VDFs if the active user cannot be determined.
+    Return localconfig.vdf path(s) to update.
+    Targets the most-recently-active Steam user only (to avoid clobbering other
+    accounts on shared PCs). Falls back to all user VDFs if the active user
+    cannot be determined.
+    Logs clearly at each decision point so failures are easy to diagnose.
     """
     root = _steam_root()
     if not root:
-        return []
-    userdata = root / "userdata"
-    if not userdata.exists():
+        logger.error(
+            "[resonite] Steam root not found. "
+            "Is Steam installed? Try installing Steam or check that "
+            "HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam\\InstallPath exists in the registry."
+        )
         return []
 
+    userdata = root / "userdata"
+    if not userdata.exists():
+        logger.error(
+            f"[resonite] Steam userdata directory not found: {userdata}. "
+            "Has Steam ever been logged into on this PC?"
+        )
+        return []
+
+    all_vdfs = list(userdata.glob("*/config/localconfig.vdf"))
+    logger.debug(f"[resonite] All localconfig.vdf files found: {[str(v) for v in all_vdfs]}")
+
+    if not all_vdfs:
+        logger.error(
+            f"[resonite] No localconfig.vdf files found under {userdata}. "
+            "Log into Steam at least once, then launch Resonite to create the config entry."
+        )
+        return []
+
+    # Try to target the active user only
     active_id = _find_active_userid(root)
     if active_id:
         candidate = userdata / active_id / "config" / "localconfig.vdf"
         if candidate.exists():
-            logger.debug(f"[resonite] Using localconfig.vdf for active user {active_id}")
+            logger.info(f"[resonite] Using localconfig.vdf for active user {active_id}: {candidate}")
             return [candidate]
-        logger.warning(
-            f"[resonite] Active userid {active_id} has no localconfig.vdf — "            f"falling back to all users"
+        else:
+            logger.warning(
+                f"[resonite] Active user {active_id} has no localconfig.vdf at {candidate}. "
+                "Falling back to all user VDFs."
+            )
+    else:
+        logger.info(
+            "[resonite] Could not determine active Steam user — "
+            f"falling back to all {len(all_vdfs)} user VDF(s)."
         )
 
-    # Fallback: all VDFs (single-user machines or loginusers.vdf unreadable)
-    return list(userdata.glob("*/config/localconfig.vdf"))
+    return all_vdfs
 
 
 def _steam_is_running() -> bool:
@@ -147,12 +198,9 @@ def _resonite_is_running() -> bool:
 
 # ---------------------------------------------------------------------------
 # localconfig.vdf read/write
-# We use plain text manipulation rather than a full VDF parser to avoid
-# adding a dependency. The LaunchOptions line is a simple quoted string.
 # ---------------------------------------------------------------------------
 
 def _read_vdf_text(path: Path) -> str:
-    # Try UTF-8 first, fall back to latin-1 (Steam sometimes writes latin-1)
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
             return path.read_text(encoding=enc)
@@ -163,9 +211,8 @@ def _read_vdf_text(path: Path) -> str:
 
 def _find_app_block(text: str, app_id: str):
     """
-    Locate the app_id block using balanced brace counting.
-    [^}]* fails on VDF because app blocks contain nested sub-blocks
-    (e.g. "cloud" { ... }) whose } terminates the naive regex early.
+    Locate an app_id block using balanced brace counting.
+    Naive [^}]* regex fails when the block contains nested sub-blocks.
     Returns (block_content, open_brace_pos, close_brace_pos) or (None,-1,-1).
     """
     marker = f'"{app_id}"'
@@ -189,24 +236,27 @@ def _find_app_block(text: str, app_id: str):
 def _get_launch_options(vdf_path: Path) -> str | None:
     """
     Extract the LaunchOptions value for Resonite from localconfig.vdf.
-    Uses balanced-brace block extraction to survive nested sub-blocks.
-    The reader allows \" escape sequences inside the VDF value (used to
-    quote paths with spaces without breaking VDF outer quoting).
+    Returns the raw string, '' if the key is absent, None if the app block is absent.
     """
     text = _read_vdf_text(vdf_path)
     block, _, _ = _find_app_block(text, RESONITE_APP_ID)
     if block is None:
+        logger.warning(
+            f"[resonite] App block {RESONITE_APP_ID} not found in {vdf_path}. "
+            "Has Resonite been launched from Steam at least once on this account?"
+        )
         return None
-    # Allow \" inside the value: [^"\] matches normal chars, \. matches \+anything
     lo_pat = re.compile(r'"LaunchOptions"\s+"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
     m = lo_pat.search(block)
-    return m.group(1) if m else ""
+    value = m.group(1) if m else ""
+    logger.debug(f"[resonite] Read LaunchOptions from {vdf_path.parent.parent.name}: {value!r}")
+    return value
 
 
 def _strip_resonite_path_args(launch_opts: str) -> str:
     """
     Remove -DataPath and -CachePath (and their values) from a launch options string.
-    Handles: \"quoted paths with spaces\", unquoted tokens, bare flags with no value.
+    Handles: \"quoted paths\", unquoted tokens, bare flags with no value.
     """
     result = re.sub(
         r'-(?:DataPath|CachePath)(?:\s+(?:\\"[^"]*\\"|(?!-)\S+))?',
@@ -220,9 +270,9 @@ def _strip_resonite_path_args(launch_opts: str) -> str:
 def _build_path_arg(flag: str, path: Path) -> str:
     """
     Build a -Flag value for the VDF LaunchOptions string.
-    Paths with spaces are wrapped in \\"-escaped quotes so the VDF outer
-    quoting is not broken. Steam and Windows CreateProcess both handle \\"
-    correctly — the backslash escapes the quote in the command-line string.
+    Paths with spaces are wrapped in backslash-escaped quotes.
+    Forward slashes replace backslashes to avoid Windows escape sequences
+    (e.g. \\U in \\Users, \\D in \\Desktop) breaking Steam's arg parser.
     """
     s = str(path).replace("\\", "/")
     if " " in s:
@@ -232,33 +282,31 @@ def _build_path_arg(flag: str, path: Path) -> str:
 
 def _set_launch_options(vdf_path: Path, new_opts: str) -> None:
     """
-    Write new_opts as the LaunchOptions for app 2519830 in localconfig.vdf.
-    - Uses balanced-brace extraction so nested sub-blocks don't break the edit.
-    - Strips corrupt path-fragment VDF keys left by previous bad writes.
-    - Creates the app block / LaunchOptions key if absent.
-    - Backs up the original file to .vdf.bak before any write.
+    Write new_opts as the LaunchOptions for Resonite in localconfig.vdf.
+    Uses balanced-brace extraction so nested sub-blocks don't break the edit.
+    Creates the app block / LaunchOptions key if absent.
+    Backs up to .vdf.bak before writing.
     """
     text = _read_vdf_text(vdf_path)
-
-    bak = vdf_path.with_suffix('.vdf.bak')
+    bak = vdf_path.with_suffix(".vdf.bak")
     bak.write_bytes(vdf_path.read_bytes())
 
-    lo_pat = re.compile(r'"LaunchOptions"\s+"(.+?)"(?=\s*[\r\n]|\s*$)', re.IGNORECASE | re.MULTILINE)
-    # Lambda replacement avoids re.sub interpreting \U \D etc. in the path
+    lo_pat = re.compile(r'"LaunchOptions"\s+"(?:[^"\\]|\\.)*"', re.IGNORECASE)
     lo_replacement = f'"LaunchOptions"\t\t"{new_opts}"'
 
     block, bstart, bend = _find_app_block(text, RESONITE_APP_ID)
 
     if block is not None:
-        # Remove any corrupt path-fragment keys from previous bad writes
         if lo_pat.search(block):
             new_block = lo_pat.sub(lambda _: lo_replacement, block)
         else:
             new_block = block.rstrip() + f'\n\t\t\t\t\t"LaunchOptions"\t\t"{new_opts}"\n\t\t\t\t'
+            logger.info(f"[resonite] LaunchOptions key was absent — inserting it")
         new_text = text[:bstart + 1] + new_block + text[bend:]
     else:
         # App block absent — insert a minimal one into the Apps block
-        apps_block, abstart, abend = _find_app_block(text, 'Apps')
+        logger.info(f"[resonite] App block {RESONITE_APP_ID} absent — creating it")
+        apps_block, abstart, abend = _find_app_block(text, "Apps")
         insert = (
             f'\n\t\t\t\t"{RESONITE_APP_ID}"'
             f'\n\t\t\t\t{{'
@@ -266,13 +314,16 @@ def _set_launch_options(vdf_path: Path, new_opts: str) -> None:
             f'\n\t\t\t\t}}'
         )
         if apps_block is not None:
-            new_text = text[:abstart + 1] + apps_block.rstrip() + insert + '\n\t\t\t' + text[abend:]
+            new_text = text[:abstart + 1] + apps_block.rstrip() + insert + "\n\t\t\t" + text[abend:]
         else:
-            logger.error('[resonite] Could not find Apps block in localconfig.vdf — skipping write')
+            logger.error(
+                f"[resonite] Cannot find Apps block in {vdf_path}. "
+                "The localconfig.vdf may be malformed or from an unexpected Steam version."
+            )
             return
 
-    vdf_path.write_text(new_text, encoding='utf-8')
-    logger.info(f'[resonite] Wrote LaunchOptions to {vdf_path}: {new_opts!r}')
+    vdf_path.write_text(new_text, encoding="utf-8")
+    logger.info(f"[resonite] Wrote LaunchOptions to {vdf_path.parent.parent.name}: {new_opts!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +331,7 @@ def _set_launch_options(vdf_path: Path, new_opts: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _profile_data_root(profile_dir: Path) -> Path:
-    """
-    Root directory for Resonite data/cache for this profile.
-    Lives adjacent to the profile dir in a shared resonite_data/ folder,
-    keyed by profile directory name so it survives profile renames gracefully.
-    """
-    # Go up from profile_dir (profiles/<name>) to data root, then resonite_data/<name>
+    """Absolute path to resonite_data/<profile_name>/ for this profile."""
     return profile_dir.resolve().parent.parent / "resonite_data" / profile_dir.name
 
 
@@ -306,13 +352,11 @@ class ResoniteModule(VRModule):
     display_name = "Resonite"
     icon = "🌐"
     description = (
-        "Points Resonite at a per-profile -DataPath via Steam launch options. "
-        "Each profile keeps its own Resonite account/session/settings. "
-        "Set include_cache_path=True to also redirect -CachePath (off by default)."
+        "Points Resonite at a per-profile -DataPath and -CachePath via Steam "
+        "launch options. Each profile keeps its own Resonite account/world/settings."
     )
 
     def get_config_paths(self) -> list[Path]:
-        # Not used for file-copy backup — this module manages Steam launch options
         return []
 
     def get_process_names(self) -> list[str]:
@@ -336,27 +380,19 @@ class ResoniteModule(VRModule):
         )
 
     # ------------------------------------------------------------------
-    # backup() — nothing to copy, just ensure per-profile dirs exist
+    # backup() — ensure per-profile dirs exist, write paths.json manifest
     # ------------------------------------------------------------------
     def backup(self, dest_dir: Path) -> tuple[bool, str]:
-        """
-        No file copy needed — each profile has its own persistent Resonite
-        data+cache directory pair. We create them if needed and record their
-        absolute paths in a manifest so restore() uses the same paths.
-        """
         if _resonite_is_running():
             return False, "Resonite is running. Close it before saving a profile."
 
-        data_dir = _data_path(dest_dir)
+        data_dir  = _data_path(dest_dir)
         cache_dir = _cache_path(dest_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         import json
-        manifest = {
-            "data_path": str(data_dir),
-            "cache_path": str(cache_dir),
-        }
+        manifest = {"data_path": str(data_dir), "cache_path": str(cache_dir)}
         snap = dest_dir / self.id
         snap.mkdir(parents=True, exist_ok=True)
         (snap / "paths.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -376,89 +412,100 @@ class ResoniteModule(VRModule):
                 "Steam overwrites localconfig.vdf while it's open."
             )
 
-        data_dir = _data_path(src_dir)
+        data_dir  = _data_path(src_dir)
         cache_dir = _cache_path(src_dir)
-
-        # DataPath and CachePath are always paired — Resonite's database stores
-        # absolute paths to cache assets, so the two dirs must stay together.
         data_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"[resonite] restore: src_dir={src_dir.resolve()}")
-        logger.info(f"[resonite] restore: data_dir={data_dir} (exists={data_dir.exists()})")
-        logger.info(f"[resonite] restore: cache_dir={cache_dir} (exists={cache_dir.exists()})")
+        logger.info(f"[resonite] restore: data_dir={data_dir}")
+        logger.info(f"[resonite] restore: cache_dir={cache_dir}")
 
         if not data_dir.is_absolute():
-            return False, (
-                f"Data path resolved to a relative path: {data_dir}. "
-                f"This is a bug — please report it."
-            )
+            return False, f"Data path is relative: {data_dir} — this is a bug, please report it."
 
         vdfs = _find_localconfig_vdfs()
         if not vdfs:
-            return False, "Could not find Steam localconfig.vdf. Is Steam installed?"
+            return False, (
+                "Could not find Steam's localconfig.vdf. "
+                "Check the log for details on why Steam was not found."
+            )
 
-        updated = []
-        errors = []
+        new_args = (
+            _build_path_arg("-DataPath",  data_dir) + " " +
+            _build_path_arg("-CachePath", cache_dir)
+        )
+
+        updated, errors = [], []
         for vdf_path in vdfs:
             try:
-                current = _get_launch_options(vdf_path) or ""
-                logger.info(f"[resonite] current LaunchOptions in {vdf_path.parent.parent.name}: {current!r}")
+                current = _get_launch_options(vdf_path)
+                if current is None:
+                    # App block missing — _set_launch_options will create it
+                    logger.info(
+                        f"[resonite] No existing Resonite block in "
+                        f"{vdf_path.parent.parent.name} — will create it. "
+                        "Note: launch Resonite from Steam at least once if this fails."
+                    )
+                    current = ""
                 stripped = _strip_resonite_path_args(current)
-                new_args = _build_path_arg("-DataPath", data_dir) + " " + _build_path_arg("-CachePath", cache_dir)
                 new_opts = (stripped + " " + new_args).strip() if stripped else new_args
-                logger.info(f"[resonite] writing LaunchOptions: {new_opts!r}")
+                logger.info(f"[resonite] Writing to {vdf_path.parent.parent.name}: {new_opts!r}")
                 _set_launch_options(vdf_path, new_opts)
                 updated.append(vdf_path.parent.parent.name)
             except Exception as e:
-                errors.append(f"{vdf_path}: {e}")
-                logger.error(f"[resonite] Failed to update {vdf_path}: {e}")
+                errors.append(f"{vdf_path.parent.parent.name}: {e}")
+                logger.error(f"[resonite] Failed to update {vdf_path}: {e}", exc_info=True)
 
         if not updated:
-            return False, f"Failed to update any localconfig.vdf: {'; '.join(errors)}"
+            return False, (
+                f"Failed to update any localconfig.vdf. Errors: {'; '.join(errors)}"
+            )
 
         msg = (
-            f"Launch options updated for user(s): {', '.join(updated)}. "
-            f"DataPath → {data_dir}, CachePath → {cache_dir}. "
+            f"Launch options updated (user: {', '.join(updated)}). "
             f"Start Steam and launch Resonite normally."
         )
         if errors:
-            msg += f" | Errors: {'; '.join(errors)}"
+            msg += f" | Partial errors: {'; '.join(errors)}"
         return True, msg
 
     # ------------------------------------------------------------------
-    # remove() — called when switching TO a profile that has Resonite DISABLED
+    # remove_launch_args() — called when Resonite module unloaded from stack
     # ------------------------------------------------------------------
     def remove_launch_args(self) -> tuple[bool, str]:
-        """
-        Remove -DataPath/-CachePath from Steam launch options so Resonite
-        falls back to its default data location.
-        Called by the switcher when the incoming profile has this module disabled.
-        """
+        """Remove -DataPath/-CachePath so Resonite falls back to its default location."""
         if _steam_is_running():
             return False, (
-                "Steam is running. Close Steam before switching profiles — "
+                "Steam is running. Close Steam before unloading a Resonite profile — "
                 "launch option changes require Steam to be closed."
             )
 
         vdfs = _find_localconfig_vdfs()
         if not vdfs:
-            return False, "Could not find Steam's localconfig.vdf."
+            return False, (
+                "Could not find Steam's localconfig.vdf. "
+                "Check the log for details on why Steam was not found."
+            )
 
-        updated = []
-        errors = []
+        updated, errors = [], []
         for vdf_path in vdfs:
             try:
                 current = _get_launch_options(vdf_path) or ""
                 stripped = _strip_resonite_path_args(current)
+                logger.info(f"[resonite] Clearing path args for {vdf_path.parent.parent.name}: {stripped!r}")
                 _set_launch_options(vdf_path, stripped)
                 updated.append(vdf_path.parent.parent.name)
             except Exception as e:
-                errors.append(str(e))
+                errors.append(f"{vdf_path.parent.parent.name}: {e}")
+                logger.error(f"[resonite] Failed to clear {vdf_path}: {e}", exc_info=True)
 
         if not updated:
-            return False, f"Failed to clear launch args: {'; '.join(errors)}"
-        return True, f"Removed -DataPath/-CachePath for user(s): {', '.join(updated)}"
+            return False, f"Failed to clear launch args. Errors: {'; '.join(errors)}"
+        msg = f"Removed -DataPath/-CachePath (user: {', '.join(updated)})."
+        if errors:
+            msg += f" | Partial errors: {'; '.join(errors)}"
+        return True, msg
 
     def validate_backup(self, profile_dir: Path) -> tuple[bool, str]:
         data_dir = _data_path(profile_dir)
