@@ -19,9 +19,23 @@ from core.settings import AppSettings
 from gui.app import MainWindow
 
 # Paths
-DATA_DIR = ROOT / "data"
+DATA_DIR     = ROOT / "data"
 PROFILES_DIR = DATA_DIR / "profiles"
-CONFIG_FILE = DATA_DIR / "config.json"
+CONFIG_FILE  = DATA_DIR / "config.json"
+
+
+def _app_icon() -> QIcon:
+    """
+    Resolve the app icon whether running from source or as a PyInstaller exe.
+    PyInstaller sets sys._MEIPASS to the unpacked bundle directory at runtime,
+    so assets live there instead of next to main.py.
+    """
+    base = Path(getattr(sys, "_MEIPASS", ROOT))
+    for name in ("icon.ico", "icon_64.ico"):
+        candidate = base / "assets" / name
+        if candidate.exists():
+            return QIcon(str(candidate))
+    return QIcon()
 
 
 def setup_logging(level_name: str = "INFO"):
@@ -51,7 +65,11 @@ def main():
     app.setApplicationName("VRProfile Switcher")
     app.setOrganizationName("VRProfile")
 
+    icon = _app_icon()
+    app.setWindowIcon(icon)          # taskbar + all windows
+
     window = MainWindow(pm, settings)
+    window.setWindowIcon(icon)       # title bar (redundant but explicit)
     window.show()
 
     sys.exit(app.exec())

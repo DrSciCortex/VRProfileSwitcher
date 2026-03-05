@@ -434,8 +434,28 @@ class MainWindow(QMainWindow):
         # Logo area
         logo_area = QWidget()
         logo_area.setStyleSheet("background: #0d0d18; border-bottom: 1px solid #1a1a28;")
-        logo_layout = QVBoxLayout(logo_area)
-        logo_layout.setContentsMargins(14, 14, 14, 12)
+        logo_outer = QHBoxLayout(logo_area)
+        logo_outer.setContentsMargins(14, 10, 14, 10)
+        logo_outer.setSpacing(10)
+
+        # App icon
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(48, 48)
+        from pathlib import Path as _Path
+        import sys as _sys
+        _base = _Path(getattr(_sys, "_MEIPASS", _Path(__file__).resolve().parent.parent))
+        _icon_path = _base / "assets" / "icon.ico"
+        if _icon_path.exists():
+            _pixmap = QIcon(str(_icon_path)).pixmap(QSize(48, 48))
+            icon_lbl.setPixmap(_pixmap)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_outer.addWidget(icon_lbl)
+
+        # Title + subtitle stacked vertically
+        text_col = QWidget()
+        text_col.setStyleSheet("background: transparent;")
+        logo_layout = QVBoxLayout(text_col)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
         logo_layout.setSpacing(2)
 
         title_lbl = QLabel("VRProfile")
@@ -445,6 +465,9 @@ class MainWindow(QMainWindow):
         sub_lbl = QLabel("Multi-app profile switcher")
         sub_lbl.setObjectName("subheader")
         logo_layout.addWidget(sub_lbl)
+
+        logo_outer.addWidget(text_col)
+        logo_outer.addStretch()
 
         layout.addWidget(logo_area)
 

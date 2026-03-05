@@ -16,8 +16,17 @@ would unpack to a temp directory on every launch, breaking relative path
 resolution for profiles, logs, and config.
 
 To build a single exe anyway, pass --onefile on the command line.
+
+Privacy note
+------------
+PyInstaller bakes the absolute source path into every .pyc file's co_filename
+field and the exe's internal file table. To keep your username out of the
+binary, build from a path that doesn't contain it — e.g. D:\\build\\VRProfileSwitcher.
+PYTHONHASHSEED=0 and SOURCE_DATE_EPOCH=0 are set automatically for deterministic,
+timestamp-free bytecode.
 """
 
+import os
 import subprocess
 import sys
 import shutil
@@ -27,13 +36,12 @@ from pathlib import Path
 
 APP_NAME    = "VRProfileSwitcher"
 ENTRY_POINT = "main.py"
-ICON        = "assets/icon.ico"      # multi-resolution ico from logo.png
+ICON        = "assets/icon.ico"
 ONE_FILE    = False
 
-# Non-Python data to bundle (src_relative_to_root, dest_inside_bundle)
 DATAS = [
-    ("assets/icon.ico",      "assets"),
-    ("assets/icon_64.ico",   "assets"),
+    ("assets/icon.ico",    "assets"),
+    ("assets/icon_64.ico", "assets"),
 ]
 
 HIDDEN_IMPORTS = [
@@ -71,14 +79,28 @@ def clean(root: Path):
         print(f"  Removed {spec}")
 
 
+def check_privacy(root: Path):
+    username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    if username and username.lower() in str(root).lower():
+        print()
+        print("  *** PRIVACY WARNING ***")
+        print(f"  Build path contains your username: {root}")
+        print("  This will be baked into every .pyc inside the exe.")
+        print("  Move the project to a neutral path (e.g. D:\\build\\VRProfileSwitcher)")
+        print("  before building a public release.")
+        print()
+
+
 def build(root: Path, one_file: bool):
     args = [
         sys.executable, "-m", "PyInstaller",
         "--name", APP_NAME,
         "--noconfirm",
         "--clean",
-        "--windowed",                # no console window
+        "--windowed",
         "--onefile" if one_file else "--onedir",
+        # Record collected files relative to project root, not as absolute paths
+        "--paths", ".",
     ]
 
     icon_path = root / ICON
@@ -101,10 +123,15 @@ def build(root: Path, one_file: bool):
     for exc in EXCLUDES:
         args += ["--exclude-module", exc]
 
-    args.append(str(root / ENTRY_POINT))
+    args.append(ENTRY_POINT)
 
-    print(f"\nRunning PyInstaller...\n")
-    result = subprocess.run(args, cwd=str(root))
+    # Deterministic bytecode, no build-machine timestamps in .pyc headers
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"]    = "0"
+    env["SOURCE_DATE_EPOCH"] = "0"
+
+    print("\nRunning PyInstaller...\n")
+    result = subprocess.run(args, cwd=str(root), env=env)
 
     if result.returncode != 0:
         print("\nBuild FAILED.")
@@ -112,11 +139,10 @@ def build(root: Path, one_file: bool):
 
     if not one_file:
         dist = root / "dist" / APP_NAME
-        # Create empty data/ so the app can write its log on very first launch
         (dist / "data").mkdir(exist_ok=True)
-        print(f"\n  Created empty data/ in {dist}")
+        print(f"\n  Created empty data/ in dist/{APP_NAME}/")
 
-    print(f"\nBuild SUCCESS → {root / 'dist'}")
+    print(f"\nBuild SUCCESS → dist/")
     if not one_file:
         print(f"  Folder: dist/{APP_NAME}/")
         print(f"  Exe:    dist/{APP_NAME}/{APP_NAME}.exe")
@@ -134,11 +160,13 @@ if __name__ == "__main__":
     parsed = parser.parse_args()
 
     one_file = ONE_FILE or parsed.onefile
-    root = Path(__file__).resolve().parent
+    root     = Path(__file__).resolve().parent
 
     print("=== VRProfileSwitcher build ===")
     print(f"  Mode: {'onefile' if one_file else 'onedir'}")
+    print(f"  Root: {root}")
 
+    check_privacy(root)
     clean(root)
     if not parsed.clean_only:
         build(root, one_file)

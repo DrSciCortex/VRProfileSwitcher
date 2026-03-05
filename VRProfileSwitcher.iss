@@ -93,8 +93,9 @@ Filename: "taskkill.exe"; Parameters: "/F /IM {#AppExeName}"; \
   Flags: runhidden skipifdoesntexist; RunOnceId: "KillApp"
 
 [UninstallDelete]
-; Remove app files but leave data\ for the Pascal prompt below
-Type: filesandordirs; Name: "{app}\*"; Excludes: "data\*"
+; Remove the install directory if empty after uninstall
+; (user data in data\ is handled separately by the Pascal prompt)
+Type: dirifempty; Name: "{app}"
 
 [Code]
 { Ask whether to delete user data (profiles, config, logs) on uninstall }
@@ -109,9 +110,9 @@ begin
     if DirExists(DataDir) then
     begin
       Answer := MsgBox(
-        'Do you want to delete your VRProfile data?' + #13#10 + #13#10 +
-        'This includes all profiles, configuration, and logs stored in:' + #13#10 +
-        DataDir + #13#10 + #13#10 +
+        'Do you want to delete your VRProfile data?' + Chr(13) + Chr(10) + Chr(13) + Chr(10) +
+        'This includes all profiles, configuration, and logs stored in:' + Chr(13) + Chr(10) +
+        DataDir + Chr(13) + Chr(10) + Chr(13) + Chr(10) +
         'Click Yes to delete everything, No to keep your data.',
         mbConfirmation, MB_YESNO or MB_DEFBUTTON2
       );
@@ -135,8 +136,7 @@ begin
     if CompareStr(InstalledVersion, '{#AppVersion}') > 0 then
     begin
       MsgBox(
-        'A newer version (' + InstalledVersion + ') of {#AppName} is already installed.' +
-        #13#10 + 'Setup will now exit.',
+        'A newer version (' + InstalledVersion + ') of ' + ExpandConstant('{#AppName}') + ' is already installed.' + Chr(13) + Chr(10) + 'Setup will now exit.',
         mbError, MB_OK
       );
       Result := False;
