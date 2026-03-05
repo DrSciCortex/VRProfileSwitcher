@@ -233,13 +233,51 @@ def _find_app_block(text: str, app_id: str):
     return None, -1, -1
 
 
+def _find_resonite_block(text: str):
+    """
+    Find the Resonite (2519830) block scoped within Software > Valve > Steam.
+    Some VDFs have a second shallow "2519830" entry at the top level (sibling
+    of "Software") used for cloud/achievement metadata — that one has an empty
+    LaunchOptions and must be ignored. We drill through the Software > Valve >
+    Steam chain, accumulating absolute offsets at each level so that the
+    returned bstart/bend positions are correct for splicing back into the full text.
+    Falls back to a global search if the Steam block chain isn't found.
+    Returns (block_content, abs_bstart, abs_bend) with absolute offsets into text.
+    """
+    scope = text
+    abs_offset = 0
+    for parent in ("Software", "Valve", "Steam"):
+        block, bstart, bend = _find_app_block(scope, parent)
+        if block is None:
+            logger.warning(
+                f"[resonite] Expected '{parent}' block not found in localconfig.vdf — "
+                f"falling back to global search. This may target the wrong '2519830' entry "
+                f"if multiple exist. Please report this with a sanitised copy of your VDF."
+            )
+            return _find_app_block(text, RESONITE_APP_ID)
+        abs_offset += bstart + 1  # +1 skips the opening {
+        scope = block
+
+    inner_block, rel_bstart, rel_bend = _find_app_block(scope, RESONITE_APP_ID)
+    if inner_block is None:
+        logger.warning(
+            f"[resonite] Resonite ({RESONITE_APP_ID}) block not found inside "
+            f"Software > Valve > Steam — falling back to global search. "
+            f"Has Resonite been launched from Steam at least once?"
+        )
+        return _find_app_block(text, RESONITE_APP_ID)
+
+    logger.debug("[resonite] Found Resonite block via Software > Valve > Steam scope")
+    return inner_block, rel_bstart + abs_offset, rel_bend + abs_offset
+
+
 def _get_launch_options(vdf_path: Path) -> str | None:
     """
     Extract the LaunchOptions value for Resonite from localconfig.vdf.
     Returns the raw string, '' if the key is absent, None if the app block is absent.
     """
     text = _read_vdf_text(vdf_path)
-    block, _, _ = _find_app_block(text, RESONITE_APP_ID)
+    block, _, _ = _find_resonite_block(text)
     if block is None:
         logger.warning(
             f"[resonite] App block {RESONITE_APP_ID} not found in {vdf_path}. "
@@ -294,7 +332,7 @@ def _set_launch_options(vdf_path: Path, new_opts: str) -> None:
     lo_pat = re.compile(r'"LaunchOptions"\s+"(?:[^"\\]|\\.)*"', re.IGNORECASE)
     lo_replacement = f'"LaunchOptions"\t\t"{new_opts}"'
 
-    block, bstart, bend = _find_app_block(text, RESONITE_APP_ID)
+    block, bstart, bend = _find_resonite_block(text)
 
     if block is not None:
         if lo_pat.search(block):
