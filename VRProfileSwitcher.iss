@@ -34,8 +34,11 @@ OutputBaseFilename=VRProfileSwitcher-{#AppVersion}-Setup
 SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 
-; Wizard icon shown on the welcome/finish pages
-WizardSmallImageFile=assets\icon_64.ico
+; Wizard images — must be BMP format
+; wizard_small.bmp: 55x58px — top-right corner image on each page
+; wizard_banner.bmp: 164x314px — left panel image on welcome/finish pages
+WizardSmallImageFile=assets\wizard_small.bmp
+WizardImageFile=assets\wizard_banner.bmp
 
 ; Compression
 Compression=lzma2/ultra64
@@ -73,8 +76,8 @@ Source: "dist\VRProfileSwitcher\*"; DestDir: "{app}"; Flags: ignoreversion recur
 Name: "{app}\data"
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\icon.ico"
-Name: "{autodesktop}\{#AppName}";  Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\icon.ico"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{autodesktop}\{#AppName}";  Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Registry]
 ; Optional startup entry
